@@ -1,0 +1,36 @@
+# Rust build output and rustfmt backups.
+/target/
+**/*.rs.bk
+
+# Generated test output and compiler profiling data.
+/test-artifacts/
+*.profraw
+*.profdata
+
+# Python bytecode from the terminal test helpers.
+__pycache__/
+*.py[cod]
+
+# macOS filesystem metadata.
+.DS_Store
+._*
+
+# Local research, plans, concept images, and one-off live verification.
+/docs/
+/plan/
+/DRAFT_PLAN_V2.md
+/REQUIREMENTS.md
+/RESEARCH.md
+/tests/live_herdr_check.py
+
+# Local agent instructions, tooling state, and environment overrides.
+/AGENTS.md
+/CLAUDE.md
+/.agents/
+/.codex/
+/.env
+/.env.*
+!/.env.example
+
+# Cargo.lock is intentionally versioned: qnav is an application.
+# Do not ignore .cargo/ wholesale; shared Cargo configuration belongs in Git.
