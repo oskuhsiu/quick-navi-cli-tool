@@ -140,6 +140,8 @@ class Terminal:
         assert b"\x1b[?1049l" in self.output, "alternate screen not restored"
         assert b"\x1b[?2004l" in self.output, "bracketed paste not disabled"
         assert b"\x1b[?25h" in self.output, "cursor not restored"
+        for mode in (1000, 1002, 1003, 1015, 1006):
+            assert f"\x1b[?{mode}l".encode() in self.output, f"mouse mode {mode} not disabled"
         self.send(b"\n")
         self.wait(lambda: self.process.poll() is not None, "supervisor exit")
         self.pump(0)
@@ -180,7 +182,7 @@ def smoke(binary):
         for size in [(120, 30), (80, 24), (40, 12)]:
             terminal = Terminal([str(binary), "--config", str(config)], env, fixture, size, f"navigation-{size[0]}x{size[1]}")
             try:
-                terminal.contains("depth 1")
+                terminal.contains("depth 3")
                 assert "alpha" not in terminal.screen.text(), "startup unexpectedly shows child listing"
                 terminal.contains("(none")
                 terminal.send(DOWN)
@@ -200,7 +202,7 @@ def smoke(binary):
                     compact = "".join(line.strip() for line in target_lines)
                     return str(root / "alpha") in compact or "Resize to read full target:" in terminal.screen.text()
                 terminal.wait(full_target_or_hint, "full selected target or explicit resize hint")
-                for shortcut in ("Ctrl+O hd", "Ctrl+P pane", "Ctrl+C exit", "Ctrl+A add root", "Ctrl+N mkdir", "Ctrl+G git init", "Ctrl+R branch", "Ctrl+L all"):
+                for shortcut in ("Ctrl+O hd", "Ctrl+P pane", "Ctrl+C exit", "Ctrl+A add root", "Ctrl+N mkdir", "Ctrl+G git init", "Ctrl+R refresh branch", "Ctrl+L reload roots"):
                     terminal.contains(shortcut, "readable complete shortcut " + shortcut)
                 assert b"38;2;245;247;250" in terminal.output, "missing high-contrast help text"
                 assert b"48;2;24;29;36" in terminal.output, "missing help background"
@@ -215,13 +217,13 @@ def smoke(binary):
 
         terminal = Terminal([str(binary), "--config", str(config)], env, fixture, (120, 30), "filter-refresh-paste")
         try:
-            terminal.contains("depth 1")
+            terminal.contains("depth 3")
             terminal.send(DOWN)
             terminal.contains("alpha")
             terminal.contains(r"bad\u{1b}[31mname")
             assert b"bad\x1b[31mname" not in terminal.output, "filename injected terminal controls"
             terminal.send(b"]")
-            terminal.contains("depth 2")
+            terminal.contains("depth 4")
             terminal.send(b"nested")
             terminal.contains("/nested")
             terminal.send(b"\t")
@@ -239,7 +241,7 @@ def smoke(binary):
             terminal.contains("newclone")
             terminal.paste("[]")
             terminal.contains("filter: []")
-            terminal.contains("depth 2")
+            terminal.contains("depth 4")
             terminal.paste("bad\n\x01")
             terminal.contains("Paste rejected")
             terminal.contains("filter: []")
@@ -263,7 +265,7 @@ def smoke(binary):
             terminal.send(b"\r")
             terminal.contains("Root added:")
             assert json.loads(empty_config.read_text())["roots"][0]["path"] == str(added)
-            terminal.contains("depth 1")
+            terminal.contains("depth 3")
             terminal.send(b"\x03")
             terminal.finish(130)
         finally: terminal.close()
@@ -275,7 +277,7 @@ def smoke(binary):
             command = "source " + shlex.quote(str(REPO / "shell" / ("qnav." + shell))) + "; qnav --config " + shlex.quote(str(config)) + '; qnav_status=$?; printf "\\nQNAV_RC:%s\\n" "$qnav_status"; printf "QNAV_CWD:%s\\n" "$PWD"'
             terminal = Terminal([executable, "-f", "-c", command], env, fixture, (120, 30), "wrapper-" + shell)
             try:
-                terminal.contains("depth 1")
+                terminal.contains("depth 3")
                 terminal.send(DOWN)
                 terminal.contains("alpha")
                 terminal.send(RIGHT)

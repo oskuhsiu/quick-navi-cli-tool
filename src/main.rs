@@ -1,8 +1,9 @@
 use crossterm::{
     cursor::{Hide, Show},
     event::{
-        self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
-        KeyModifiers,
+        self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
+        Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent,
+        MouseEventKind,
     },
     execute,
     terminal::{
@@ -40,7 +41,7 @@ fn options() -> Result<Option<Options>, String> {
                 let bash_wrapper = display_path(&checkout.join("shell/qnav.bash"));
                 let zsh_wrapper = display_path(&checkout.join("shell/qnav.zsh"));
                 println!(
-                    "qnav — terminal directory columns\n\nUsage: qnav [--config PATH]\n\nEnter changes the CALLING shell's directory, so it needs a shell function.\ncargo install installs the binary only; it does not set up your shell.\nAfter leaving qnav with Ctrl-C, source ONE wrapper for your shell:\n  Bash wrapper: {bash_wrapper}\n  Zsh wrapper:  {zsh_wrapper}\nUse: source '<absolute wrapper path>', then run qnav again.\nThese files are in this build's source checkout; if moved, use its new location.\nWithout shell setup, browsing, hd, pane, mkdir and git init still work.\n\n↑↓ select  ←→ columns  [ ] depth (1–9)  type to filter\nTab browse match  Esc clear/cancel  Ctrl-C exit\nEnter cd  Ctrl-O hd  Ctrl-P Herdr pane\nCtrl-A add root  Ctrl-N mkdir  Ctrl-G git init\nCtrl-R refresh branch  Ctrl-L reload all roots\n\nNo automatic roots, profile edits, background daemon, or symlink traversal."
+                    "qnav — terminal directory columns\n\nUsage: qnav [--config PATH]\n\nEnter changes the CALLING shell's directory, so it needs a shell function.\ncargo install installs the binary only; it does not set up your shell.\nAfter leaving qnav with Ctrl-C, source ONE wrapper for your shell:\n  Bash wrapper: {bash_wrapper}\n  Zsh wrapper:  {zsh_wrapper}\nUse: source '<absolute wrapper path>', then run qnav again.\nThese files are in this build's source checkout; if moved, use its new location.\nWithout shell setup, browsing, hd, pane, mkdir and git init still work.\n\n↑↓ select  ←→ columns  [ ] depth (1–9, default 3)  type to filter\nTab browse match  Esc clear/cancel  Ctrl-C exit\nMouse: left-click selects; wheel moves selection in hovered list\nEnter cd  Ctrl-O hd  Ctrl-P Herdr pane\nCtrl-A add root  Ctrl-N mkdir  Ctrl-G git init\nCtrl-R refresh branch  Ctrl-L reload all roots\n\nNo automatic roots, profile edits, background daemon, or symlink traversal."
                 );
                 return Ok(None);
             }
@@ -74,6 +75,7 @@ impl TerminalGuard {
             io::stdout(),
             EnterAlternateScreen,
             EnableBracketedPaste,
+            EnableMouseCapture,
             Hide
         )?;
         Ok(guard)
@@ -84,6 +86,7 @@ fn restore_terminal() {
     let _ = execute!(
         io::stdout(),
         EndSynchronizedUpdate,
+        DisableMouseCapture,
         DisableBracketedPaste,
         Show,
         LeaveAlternateScreen
@@ -311,6 +314,51 @@ impl Runtime {
                 self.app.edit_query(q);
             }
             _ => {}
+        }
+    }
+    fn mouse(&mut self, mouse: MouseEvent, hits: &ui::HitMap) -> bool {
+        if self.exiting
+            || self.config_busy
+            || self.app.add_root.is_some()
+            || self.app.pending_action.as_ref().is_some_and(|action| {
+                matches!(
+                    action.phase,
+                    ActionPhase::Input(_) | ActionPhase::Confirm { .. } | ActionPhase::Cancelling
+                )
+            })
+            || !mouse.modifiers.is_empty()
+        {
+            return false;
+        }
+        let Some((list, key)) = hits.hit(mouse.column, mouse.row) else {
+            return false;
+        };
+        match mouse.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(key) = key else { return false };
+                match list {
+                    ui::MouseList::Column(column) => self.app.select_column_row(column, key),
+                    ui::MouseList::Matches => self.app.select_match(key),
+                }
+            }
+            MouseEventKind::ScrollDown | MouseEventKind::ScrollUp => {
+                match list {
+                    ui::MouseList::Column(column) => {
+                        if !self.app.focus_column(column) {
+                            return false;
+                        }
+                    }
+                    ui::MouseList::Matches => {
+                        if !matches!(self.app.navigation, Navigation::Filter(_)) {
+                            return false;
+                        }
+                    }
+                }
+                self.app
+                    .move_vertical(mouse.kind == MouseEventKind::ScrollDown);
+                true
+            }
+            _ => false,
         }
     }
     fn paste(&mut self, text: String) {
@@ -541,6 +589,7 @@ fn run(options: Options) -> Result<i32, String> {
     let backend = ratatui::backend::CrosstermBackend::new(io::stdout());
     let mut terminal = ratatui::Terminal::new(backend).map_err(|e| e.to_string())?;
     let mut dirty = true;
+    let mut hits = ui::HitMap::default();
     loop {
         dirty |= runtime.update();
         if runtime.exiting && runtime.app.pending_action.is_none() && !runtime.config_busy {
@@ -549,7 +598,9 @@ fn run(options: Options) -> Result<i32, String> {
         if dirty {
             execute!(io::stdout(), BeginSynchronizedUpdate).map_err(|e| e.to_string())?;
             terminal
-                .draw(|frame| ui::draw(frame, &runtime.app))
+                .draw(|frame| {
+                    hits = ui::draw(frame, &runtime.app);
+                })
                 .map_err(|e| e.to_string())?;
             execute!(io::stdout(), EndSynchronizedUpdate).map_err(|e| e.to_string())?;
             dirty = false;
@@ -567,6 +618,10 @@ fn run(options: Options) -> Result<i32, String> {
             match event::read().map_err(|e| e.to_string())? {
                 Event::Key(key) => runtime.key(key),
                 Event::Paste(text) => runtime.paste(text),
+                Event::Mouse(mouse) => {
+                    dirty |= runtime.mouse(mouse, &hits);
+                    continue;
+                }
                 Event::Resize(..) => {}
                 _ => continue,
             };
@@ -616,6 +671,86 @@ mod tests {
             ExplorationPolicy { home: None },
         );
         (rt, tmp)
+    }
+    fn hit_map(rt: &Runtime) -> ui::HitMap {
+        let mut terminal =
+            ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+        let mut hits = ui::HitMap::default();
+        terminal
+            .draw(|frame| hits = ui::draw(frame, &rt.app))
+            .unwrap();
+        hits
+    }
+    fn mouse(kind: MouseEventKind) -> MouseEvent {
+        MouseEvent {
+            kind,
+            column: 2,
+            row: 3,
+            modifiers: KeyModifiers::NONE,
+        }
+    }
+    #[test]
+    fn mouse_routes_clicks_and_wheels_but_ignores_motion_release_and_blank_clicks() {
+        let (mut rt, _tmp) = runtime();
+        let hits = hit_map(&rt);
+        for kind in [
+            MouseEventKind::Moved,
+            MouseEventKind::Up(MouseButton::Left),
+            MouseEventKind::Down(MouseButton::Right),
+            MouseEventKind::Drag(MouseButton::Left),
+        ] {
+            assert!(!rt.mouse(mouse(kind), &hits));
+            assert_eq!(rt.app.target(), None);
+        }
+        let click = mouse(MouseEventKind::Down(MouseButton::Left));
+        let mut modified = click;
+        modified.modifiers = KeyModifiers::CONTROL;
+        assert!(!rt.mouse(modified, &hits));
+        assert!(rt.mouse(click, &hits));
+        assert_eq!(rt.app.target(), Some(NodeKey::root(2)));
+        assert!(rt.app.pending_action.is_none());
+        assert!(!rt.exiting);
+        let mut blank = click;
+        blank.row = 4;
+        assert!(!rt.mouse(blank, &hits));
+        assert!(rt.mouse(mouse(MouseEventKind::ScrollUp), &hits));
+        assert_eq!(rt.app.target(), Some(NodeKey::root(1)));
+    }
+    #[test]
+    fn modal_and_busy_states_block_mouse_and_running_actions_keep_their_target() {
+        let (mut rt, _tmp) = runtime();
+        rt.app.move_vertical(true);
+        let hits = hit_map(&rt);
+        let click = mouse(MouseEventKind::Down(MouseButton::Left));
+        rt.config_busy = true;
+        assert!(!rt.mouse(click, &hits));
+        rt.config_busy = false;
+        rt.app.add_root = Some(String::new());
+        assert!(!rt.mouse(click, &hits));
+        rt.app.add_root = None;
+        rt.app.freeze_action(ActionKind::GitInit).unwrap();
+        for phase in [
+            ActionPhase::Input(String::new()),
+            ActionPhase::Confirm {
+                message: "confirm".into(),
+                accepted: false,
+            },
+            ActionPhase::Cancelling,
+        ] {
+            rt.app.pending_action.as_mut().unwrap().phase = phase;
+            assert!(!rt.mouse(click, &hits));
+            assert!(!rt.mouse(mouse(MouseEventKind::ScrollDown), &hits));
+            assert_eq!(rt.app.target(), Some(NodeKey::root(1)));
+        }
+        rt.app.pending_action.as_mut().unwrap().phase = ActionPhase::Running;
+        assert!(rt.mouse(click, &hits));
+        assert_eq!(rt.app.target(), Some(NodeKey::root(2)));
+        assert_eq!(
+            rt.app.pending_action.as_ref().unwrap().target,
+            PathBuf::from("/work/a")
+        );
+        rt.exiting = true;
+        assert!(!rt.mouse(mouse(MouseEventKind::ScrollUp), &hits));
     }
     #[test]
     fn uncertain_operations_remain_guarded_after_another_uncertain_target() {
@@ -682,7 +817,7 @@ mod tests {
         rt.app.add_root = Some(String::new());
         rt.paste("a[]\nb".into());
         assert_eq!(rt.app.add_root.as_deref(), Some("a[]\nb"));
-        assert_eq!(rt.app.depth, 1);
+        assert_eq!(rt.app.depth, 3);
         rt.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         rt.app.move_vertical(true);
         let id = rt.app.freeze_action(ActionKind::GitInit).unwrap();

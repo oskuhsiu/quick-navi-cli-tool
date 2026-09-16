@@ -39,6 +39,8 @@ fn one_session_survives_100_scope_refresh_and_search_cycles_without_growth() {
     let policy = ExplorationPolicy { home: None };
     let scanner = Scanner::new(policy.clone());
     let mut app = App::new(roots.clone(), policy);
+    // Exercise pruning between depths 1 and 2 regardless of the startup default.
+    app.depth = 1;
     for cycle in 0..100 {
         app.change_depth(true);
         app.edit_query("project".into());

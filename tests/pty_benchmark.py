@@ -19,7 +19,7 @@ from pty_smoke import Terminal, REPO, DOWN, RIGHT, LEFT, configure
 
 
 def frame(terminal):
-    terminal.wait(lambda: terminal.screen.frame_count > 0 and "depth 1" in terminal.screen.text() and "Ctrl+A add root" in terminal.screen.text(), "complete initial synchronized frame")
+    terminal.wait(lambda: terminal.screen.frame_count > 0 and "depth 3" in terminal.screen.text() and "Ctrl+A add root" in terminal.screen.text(), "complete initial synchronized frame")
 
 
 def selected(terminal, suffix, query=None):
@@ -122,7 +122,7 @@ def run(binary, samples, output, warm_only=False, max_warm_p95=None):
                             terminal = Terminal(argv, env, fixture, (120, 30), "benchmark-cold-match")
                             holder.append(terminal)
                             frame(terminal)
-                            terminal.send(b"]")
+                            terminal.send(b"[")
                             terminal.contains("depth 2")
                             def cold_match():
                                 terminal.send(b"needle")
@@ -146,7 +146,7 @@ def run(binary, samples, output, warm_only=False, max_warm_p95=None):
             terminal = Terminal([str(binary), "--config", str(warm_config)], env, fixture, (120, 30), "benchmark-warm-10000")
             try:
                 frame(terminal)
-                terminal.send(b"]needle")
+                terminal.send(b"[needle")
                 terminal.wait(lambda: "complete" in terminal.screen.text() and "/needle" in terminal.screen.text(), "warm candidate collection", timeout=60)
                 for _ in range(samples):
                     def typing():

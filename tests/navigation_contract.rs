@@ -55,7 +55,7 @@ fn match_all(app: &mut App) {
 fn startup_and_unselected_child_column_have_no_target() {
     let mut app = app(&["/work", "/other"]);
     let root = NodeKey::root(1);
-    assert_eq!(app.depth, 1);
+    assert_eq!(app.depth, 3);
     assert_eq!(app.target(), None);
     assert_eq!(app.pending_scan_count(), 0);
     assert!(
@@ -75,8 +75,78 @@ fn startup_and_unselected_child_column_have_no_target() {
 }
 
 #[test]
+fn direct_row_selection_focuses_the_column_and_discards_descendants() {
+    let mut app = app(&["/work", "/other"]);
+    app.change_depth(true);
+    let root = NodeKey::root(1);
+    let a = child(&root, "a");
+    let deep = child(&a, "deep");
+    listing(&mut app, &root, &["a", "b"]);
+    listing(&mut app, &a, &["deep"]);
+    app.navigation = Navigation::Browse(BrowseState::at(&deep));
+    assert!(app.select_column_row(1, &child(&root, "b")));
+    assert_eq!(app.target(), Some(child(&root, "b")));
+    assert_eq!(app.browse_projection().chain.len(), 2);
+    assert!(!app.select_column_row(1, &deep));
+    assert!(!app.select_column_row(3, &deep));
+    assert!(app.select_column_row(0, &NodeKey::root(2)));
+    assert_eq!(app.browse_projection(), BrowseState::at(&NodeKey::root(2)));
+    // A row from an old frame cannot select a child of the previous root.
+    assert!(!app.select_column_row(1, &a));
+    assert_eq!(app.target(), Some(NodeKey::root(2)));
+}
+
+#[test]
+fn focusing_a_column_supports_wheel_navigation_and_empty_lists() {
+    let mut app = app(&["/work", "/other"]);
+    let root = NodeKey::root(1);
+    listing(&mut app, &root, &["a", "b"]);
+    assert!(!app.focus_column(1));
+    assert!(app.select_column_row(0, &root));
+    assert!(app.focus_column(1));
+    assert_eq!(app.target(), None);
+    app.move_vertical(true);
+    assert_eq!(app.target(), Some(child(&root, "a")));
+    app.move_vertical(false);
+    assert_eq!(app.target(), Some(child(&root, "a")));
+    app.move_vertical(true);
+    app.move_vertical(true);
+    assert_eq!(app.target(), Some(child(&root, "b")));
+    assert!(app.focus_column(0));
+    app.move_vertical(true);
+    assert_eq!(app.target(), Some(NodeKey::root(2)));
+    assert!(app.focus_column(1));
+    app.move_vertical(true);
+    assert_eq!(app.target(), None);
+}
+
+#[test]
+fn direct_match_selection_preserves_identity_and_browse_snapshot() {
+    let mut app = app(&["/work"]);
+    let root = NodeKey::root(1);
+    app.move_vertical(true);
+    let snapshot = app.browse_projection();
+    app.edit_query("n".into());
+    let request = app.prepare_scan(root.clone(), false).unwrap();
+    batch(&mut app, &request, &["navigation", "new"]);
+    match_all(&mut app);
+    let selected = child(&root, "navigation");
+    assert!(app.select_match(&selected));
+    assert!(!app.select_match(&child(&root, "missing")));
+    assert!(!app.select_column_row(0, &root));
+    assert!(!app.focus_column(0));
+    batch(&mut app, &request, &["n"]);
+    match_all(&mut app);
+    assert_eq!(app.target(), Some(selected));
+    assert_eq!(app.query(), "n");
+    app.clear_filter(false);
+    assert_eq!(app.browse_projection(), snapshot);
+}
+
+#[test]
 fn changing_parent_and_shrinking_clear_old_descendant_selection() {
     let mut app = app(&["/work", "/other"]);
+    app.depth = 1;
     app.change_depth(true);
     let root = NodeKey::root(1);
     let a = child(&root, "a");
@@ -121,6 +191,7 @@ fn filter_discovers_unvisited_branches_and_keeps_same_query_selection() {
 #[test]
 fn tab_adopts_match_while_escape_restores_snapshot() {
     let mut app = app(&["/work"]);
+    app.depth = 1;
     let root = NodeKey::root(1);
     listing(&mut app, &root, &["docs"]);
     app.move_vertical(true);
@@ -219,6 +290,8 @@ fn full_reload_same_id_with_changed_path_cannot_restore_same_named_child() {
 #[test]
 fn active_filter_pins_nonmatches_and_capacity_stays_partial() {
     let mut app = app(&["/work"]);
+    // The root batch reaches the depth boundary, leaving no deeper work pending.
+    app.depth = 1;
     app.max_nodes = 2;
     let root = NodeKey::root(1);
     app.edit_query("alpha".into());
@@ -250,7 +323,7 @@ fn checking_action_freezes_path_and_cancellation_keeps_scope_locked() {
     app.change_depth(true);
     app.refresh_branch();
     app.reload_roots(vec![]);
-    assert_eq!(app.depth, 1);
+    assert_eq!(app.depth, 3);
     assert_eq!(app.scope, scope);
     assert_eq!(app.roots.len(), 2);
     assert!(app.freeze_action(ActionKind::Mkdir).is_none());

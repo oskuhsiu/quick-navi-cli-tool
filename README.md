@@ -1,7 +1,7 @@
 # qnav
 
 A directory-only terminal navigator with Finder-style columns. Pin the places
-you work in, browse with the arrow keys, or type to jump between projects.
+you work in, browse with the arrow keys or mouse, or type to jump between projects.
 
 qnav starts with **only the roots you add**. It explores a bounded depth, skips
 symlinks and common cache/build directories, and keeps its index in memory.
@@ -88,7 +88,7 @@ fall back to another column's selection.
 | --- | --- |
 | ↑ / ↓ | Select a directory in the current column or a search result |
 | → / ← | Move to the next column / return to its parent |
-| `[` / `]` | Decrease / increase exploration depth: 1–9, default 1 |
+| `[` / `]` | Decrease / increase exploration depth: 1–9, default 3 |
 | Type | Filter directory names across all roots within the allowed depth |
 | Tab | Adopt the selected search result and continue column browsing |
 | Esc | Clear the filter and restore browsing, or cancel an input/confirmation |
@@ -108,10 +108,25 @@ then Enter. Ctrl+C is the exit shortcut; double-Esc is not required.
 The shortcut bar uses bold, high-contrast text and wraps complete key/description
 pairs in narrow panes. Font size is controlled by your terminal, not qnav.
 
+## Mouse reference
+
+Mouse support is enabled automatically in terminals that report mouse events.
+
+| Input | Action |
+| --- | --- |
+| Left-click a directory | Focus its column and select it; reveal children within the depth limit |
+| Left-click a search result | Select that result; Tab continues browsing from it |
+| Wheel up / down over a list | Move selection one row in that column or search results |
+
+Enter still exits and changes the shell's directory through the wrapper. In
+search mode, the columns above Matches are a preview; use the Matches list to
+select. Input and confirmation dialogs use the keyboard and block background
+mouse navigation. Mouse capture is disabled when qnav exits.
+
 ## Exploration and refresh
 
 A pinned root is depth **0**; its immediate directories are depth **1**. The
-default depth is 1 and resets when qnav starts. `[` and `]` change how far qnav may
+default depth is 3 and resets when qnav starts. `[` and `]` change how far qnav may
 explore, not how many columns it displays at once.
 
 In normal browsing, children are read as you select their parents. Filtering
@@ -237,6 +252,7 @@ do not control your real workspaces.
 ```sh
 python3 tests/pty_smoke.py --binary target/release/qnav
 python3 tests/pty_actions.py --binary target/release/qnav
+python3 tests/pty_mouse.py --binary target/release/qnav
 cargo test --locked --release --test matching_latency -- --ignored --nocapture
 python3 tests/pty_benchmark.py --samples 100 --max-warm-p95 50
 ```

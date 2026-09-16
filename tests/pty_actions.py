@@ -33,7 +33,7 @@ def run(binary):
         terminal = Terminal([str(binary), "--config", str(config)], env, fixture,
                             (120, 30), "actions-mkdir-git-hd-pane")
         try:
-            terminal.contains("depth 1")
+            terminal.contains("depth 3")
             terminal.send(DOWN + b"\x0e")
             terminal.contains("Create child directory")
             terminal.paste("new-project")

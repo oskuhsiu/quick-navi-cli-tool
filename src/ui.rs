@@ -15,6 +15,28 @@ const HELP_BACKGROUND: Color = Color::Rgb(24, 29, 36);
 const HELP_TEXT: Color = Color::Rgb(245, 247, 250);
 const HELP_KEY: Color = Color::Rgb(128, 216, 255);
 
+/// A selectable list in the last rendered frame.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseList {
+    Column(usize),
+    Matches,
+}
+
+#[derive(Default)]
+pub struct HitMap {
+    regions: Vec<(Rect, MouseList, Vec<NodeKey>)>,
+}
+
+impl HitMap {
+    /// Returns the list and rendered row identity, or an empty list-space hit.
+    pub fn hit(&self, x: u16, y: u16) -> Option<(MouseList, Option<&NodeKey>)> {
+        self.regions.iter().find_map(|(area, list, rows)| {
+            (x >= area.x && x < area.right() && y >= area.y && y < area.bottom())
+                .then(|| (*list, rows.get((y - area.y) as usize)))
+        })
+    }
+}
+
 fn shortcut_help(width: u16, height: u16) -> Vec<Line<'static>> {
     let groups: &[&[(&str, &str)]] = &[
         &[
@@ -29,8 +51,8 @@ fn shortcut_help(width: u16, height: u16) -> Vec<Line<'static>> {
             ("Ctrl+A", "add root"),
             ("Ctrl+N", "mkdir"),
             ("Ctrl+G", "git init"),
-            ("Ctrl+R", "branch"),
-            ("Ctrl+L", "all"),
+            ("Ctrl+R", "refresh branch"),
+            ("Ctrl+L", "reload roots"),
         ],
     ];
     let key_style = Style::default().fg(HELP_KEY).add_modifier(Modifier::BOLD);
@@ -71,14 +93,15 @@ fn shortcut_help(width: u16, height: u16) -> Vec<Line<'static>> {
     lines
 }
 
-pub fn draw(frame: &mut Frame, app: &App) {
+pub fn draw(frame: &mut Frame, app: &App) -> HitMap {
+    let mut hits = HitMap::default();
     let area = frame.area();
     if area.width < 24 || area.height < 8 {
         frame.render_widget(
             Paragraph::new("qnav: window too small\nResize to at least 24x8\nCtrl-C exit"),
             area,
         );
-        return;
+        return hits;
     }
     let target = app
         .target()
@@ -126,7 +149,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     if let Navigation::Filter(s) = &app.navigation {
         let parts = Layout::vertical([Constraint::Percentage(52), Constraint::Percentage(48)])
             .split(regions[1]);
-        draw_columns(frame, app, &browse, parts[0], s.viewport);
+        draw_columns(frame, app, &browse, parts[0], s.viewport, &mut hits);
         let selected = match &s.selection {
             MatchSelection::Selected(k) => s.matches.iter().position(|m| m == k),
             _ => None,
@@ -136,6 +159,16 @@ pub fn draw(frame: &mut Frame, app: &App) {
             .unwrap_or(0)
             .saturating_sub(height.saturating_sub(1) / 2)
             .min(s.matches.len().saturating_sub(height));
+        hits.regions.push((
+            Block::default().borders(Borders::ALL).inner(parts[1]),
+            MouseList::Matches,
+            s.matches
+                .iter()
+                .skip(offset)
+                .take(height)
+                .cloned()
+                .collect(),
+        ));
         let rows: Vec<_> = s
             .matches
             .iter()
@@ -180,7 +213,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
             );
         }
     } else {
-        draw_columns(frame, app, &browse, regions[1], 0);
+        draw_columns(frame, app, &browse, regions[1], 0, &mut hits);
     }
     let target_paragraph = if target_lines > target_height as usize {
         Paragraph::new(format!("Resize to read full target:\n{target}")).wrap(Wrap { trim: false })
@@ -193,7 +226,7 @@ pub fn draw(frame: &mut Frame, app: &App) {
     );
     let status = if app.status.is_empty() {
         app.branch()
-            .map(|p| format!("Ctrl-R branch: {}", display_path(&p)))
+            .map(|p| format!("Ctrl-R refresh branch: {}", display_path(&p)))
             .unwrap_or_else(|| "Only manual roots · Ctrl-A to add a directory".into())
     } else {
         display_os(app.status.as_ref())
@@ -252,6 +285,17 @@ pub fn draw(frame: &mut Frame, app: &App) {
             ActionPhase::Cancelling => {}
         }
     }
+    if app.add_root.is_some()
+        || app.pending_action.as_ref().is_some_and(|action| {
+            matches!(
+                action.phase,
+                ActionPhase::Input(_) | ActionPhase::Confirm { .. }
+            )
+        })
+    {
+        hits.regions.clear();
+    }
+    hits
 }
 
 fn draw_columns(
@@ -260,6 +304,7 @@ fn draw_columns(
     browse: &BrowseState,
     area: Rect,
     manual_offset: usize,
+    hits: &mut HitMap,
 ) {
     let count = (browse.chain.len() + 1).min(app.depth + 1).max(1);
     let visible = (area.width as usize / 26).max(1).min(count);
@@ -325,6 +370,22 @@ fn draw_columns(
                     block.title_bottom(Line::from(state).style(Style::default().fg(Color::Yellow)));
             }
         }
+        let selected = browse
+            .chain
+            .get(column)
+            .and_then(|k| rows.iter().position(|r| r == k));
+        let height = column_area.height.saturating_sub(2) as usize;
+        let offset = selected
+            .unwrap_or(0)
+            .saturating_sub(height.saturating_sub(1) / 2)
+            .min(rows.len().saturating_sub(height));
+        if matches!(app.navigation, Navigation::Browse(_)) {
+            hits.regions.push((
+                block.inner(*column_area),
+                MouseList::Column(column),
+                rows.iter().skip(offset).take(height).cloned().collect(),
+            ));
+        }
         if rows.is_empty() {
             let text = if column == 0 {
                 "Ctrl-A\nAdd a directory".into()
@@ -349,15 +410,6 @@ fn draw_columns(
             );
             continue;
         }
-        let selected = browse
-            .chain
-            .get(column)
-            .and_then(|k| rows.iter().position(|r| r == k));
-        let height = column_area.height.saturating_sub(2) as usize;
-        let offset = selected
-            .unwrap_or(0)
-            .saturating_sub(height.saturating_sub(1) / 2)
-            .min(rows.len().saturating_sub(height));
         let items = rows
             .iter()
             .skip(offset)

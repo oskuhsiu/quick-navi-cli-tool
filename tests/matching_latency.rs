@@ -12,7 +12,7 @@ fn warm_matching_has_a_bounded_cpu_budget() {
         })
         .collect();
     let mut app = App::new(roots, ExplorationPolicy { home: None });
-    app.change_depth(true);
+    app.depth = 2;
     for id in 1..=20 {
         let root = NodeKey::root(id);
         for branch in 0..25 {

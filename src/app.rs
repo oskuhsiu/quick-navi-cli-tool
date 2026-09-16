@@ -67,7 +67,7 @@ impl App {
             roots,
             nodes,
             navigation: Navigation::Browse(BrowseState::default()),
-            depth: 1,
+            depth: 3,
             scope: 0,
             candidate_version: 0,
             work_ids: WorkIds::default(),
@@ -143,6 +143,45 @@ impl App {
                     .collect()
             })
             .unwrap_or_default()
+    }
+    pub fn focus_column(&mut self, column: usize) -> bool {
+        let Navigation::Browse(b) = &mut self.navigation else {
+            return false;
+        };
+        if column > b.chain.len() || column > self.depth {
+            return false;
+        }
+        self.restore = None;
+        b.focus = column;
+        true
+    }
+    pub fn select_column_row(&mut self, column: usize, key: &NodeKey) -> bool {
+        let Navigation::Browse(b) = &self.navigation else {
+            return false;
+        };
+        if column > b.chain.len()
+            || column > self.depth
+            || !self.column_rows(column, b).contains(key)
+        {
+            return false;
+        }
+        self.focus_column(column);
+        if let Navigation::Browse(b) = &mut self.navigation {
+            b.chain.truncate(column);
+            b.chain.push(key.clone());
+        }
+        true
+    }
+    pub fn select_match(&mut self, key: &NodeKey) -> bool {
+        let Navigation::Filter(s) = &mut self.navigation else {
+            return false;
+        };
+        if !s.matches.contains(key) {
+            return false;
+        }
+        self.restore = None;
+        s.selection = MatchSelection::Selected(key.clone());
+        true
     }
     pub fn move_vertical(&mut self, down: bool) {
         self.restore = None;
@@ -328,7 +367,7 @@ impl App {
             return;
         }
         let Some(branch) = self.branch() else {
-            self.status = "No current branch; Ctrl-L refreshes all roots".into();
+            self.status = "No current branch; Ctrl-L reloads all roots".into();
             return;
         };
         self.invalidate_path(&branch, true);
