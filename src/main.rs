@@ -48,7 +48,7 @@ fn options() -> Result<Option<Options>, String> {
                     "{}",
                     help.replace(
                         "Ctrl-O hd  Ctrl-P Herdr pane",
-                        "Ctrl-O hd  Ctrl-B branch workspace  Ctrl-P Herdr pane",
+                        "Ctrl-O hd  Ctrl-Y branch workspace  Ctrl-P Herdr pane",
                     )
                     .replace(
                         "Without shell setup, browsing, hd, pane, mkdir and git init still work.",
@@ -351,7 +351,7 @@ impl Runtime {
                 KeyCode::Char('g') => self.start_action(ActionKind::GitInit),
                 KeyCode::Char('o') => self.start_action(ActionKind::OpenHd),
                 KeyCode::Char('p') => self.start_action(ActionKind::OpenPane),
-                KeyCode::Char('b') => self.start_branch_picker(),
+                KeyCode::Char('y') => self.start_branch_picker(),
                 _ => {}
             }
             return;
@@ -1026,6 +1026,13 @@ mod tests {
         assert!(rt.app.branch_picker.is_none());
         assert!(rt.app.pending_action.is_none());
         assert_eq!(rt.app.target(), target);
+    }
+    #[test]
+    fn branch_picker_shortcut_uses_a_key_outside_herdr_prefix() {
+        let (mut rt, _tmp) = runtime();
+        rt.app.move_vertical(true);
+        rt.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        assert!(rt.app.branch_picker.is_some());
     }
     #[test]
     fn branch_picker_enter_closes_picker_before_checking_selected_branch() {

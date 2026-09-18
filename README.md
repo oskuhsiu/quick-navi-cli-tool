@@ -71,7 +71,7 @@ the setup.
 3. Use ↑/↓ to select that root. Its immediate directories appear in the next
    column; use → and ↑/↓ to select a project.
 4. Press Enter to exit and `cd` there, or Ctrl+O to open it with your external
-   `hd` while leaving qnav running. Use Ctrl+B to choose a Git branch and open
+   `hd` while leaving qnav running. Use Ctrl+Y to choose a Git branch and open
    its workspace; qnav uses `hd open` for an existing worktree and `hd new`
    when the branch does not have one yet.
 
@@ -96,7 +96,7 @@ fall back to another column's selection.
 | Esc | Clear the filter and restore browsing, or cancel an input/confirmation |
 | Enter | Exit qnav and change the calling shell's directory; requires wrapper |
 | Ctrl+O | Run external `hd` at the target; keep qnav open |
-| Ctrl+B | Choose a local Git branch and open its workspace; Esc cancels |
+| Ctrl+Y | Choose a local Git branch and open its workspace; Esc cancels |
 | Ctrl+P | Open a Herdr shell pane at the target; keep qnav open |
 | Ctrl+A | Add an existing directory as a root |
 | Ctrl+N | Create one child directory under the target |
@@ -212,7 +212,7 @@ functions. Plain browsing and Enter do not require either tool.
 
 - **Ctrl+O:** the target must be inside a Git repository. qnav runs your existing
   `hd` there; workspace behavior belongs to that tool.
-- **Ctrl+B:** the target must be inside a Git repository. qnav lists local
+- **Ctrl+Y:** the target must be inside a Git repository. qnav lists local
   branches, shows whether each already has a worktree, and runs `hd open
   <branch>` or `hd new <branch>` after you select one. Esc closes the picker
   without running an external command. Stale Git worktree metadata is shown

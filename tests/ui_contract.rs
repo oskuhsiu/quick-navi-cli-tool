@@ -28,7 +28,7 @@ fn shortcut_help_is_bold_high_contrast_and_complete_in_narrow_panes() {
         for command in [
             "Enter cd",
             "Ctrl+O hd",
-            "Ctrl+B branch",
+            "Ctrl+Y branch",
             "Ctrl+P pane",
             "Ctrl+C exit",
             "Ctrl+A add root",

@@ -69,13 +69,13 @@ def run(binary):
                 assert terminal.process.poll() is None
                 assert "Target: " + str(project) in terminal.screen.text()
             before_cancel = (fixture / "hd.record").read_bytes()
-            terminal.send(b"\x02")
+            terminal.send(b"\x19")
             terminal.contains(" Branch workspace ")
             terminal.contains("new worktree")
             terminal.send(b"\x1b")
             terminal.wait(lambda: " Branch workspace " not in terminal.screen.text(), "branch picker Esc closes")
             assert (fixture / "hd.record").read_bytes() == before_cancel
-            terminal.send(b"\x02")
+            terminal.send(b"\x19")
             terminal.contains(" Branch workspace ")
             terminal.paste("branch-workspace")
             terminal.contains("branch-workspace")
