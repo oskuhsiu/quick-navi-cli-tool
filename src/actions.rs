@@ -1,6 +1,6 @@
 //! A single asynchronous action worker; subprocesses never write to the terminal.
 use crate::{
-    model::{ActionKind, CancelToken, WorkId, display_os, display_path},
+    model::{ActionKind, BranchEntry, CancelToken, WorkId, display_os, display_path},
     scan::validate_directory,
 };
 use std::{
@@ -9,7 +9,7 @@ use std::{
     fs::{self, OpenOptions},
     io::{Read, Write},
     os::unix::{
-        ffi::OsStrExt,
+        ffi::{OsStrExt, OsStringExt},
         fs::{MetadataExt, OpenOptionsExt, PermissionsExt},
         io::AsRawFd,
         process::CommandExt,
@@ -28,6 +28,9 @@ pub struct ActionEvent {
 }
 #[derive(Debug)]
 pub enum ActionOutcome {
+    BranchesLoaded {
+        branches: Vec<BranchEntry>,
+    },
     InvalidTarget {
         message: String,
     },
@@ -52,6 +55,7 @@ struct Request {
     kind: ActionKind,
     path: PathBuf,
     child_name: Option<String>,
+    branch: Option<OsString>,
     cancel: CancelToken,
     check: bool,
     deadline: Instant,
@@ -106,6 +110,7 @@ impl Actions {
             kind,
             path,
             child_name: None,
+            branch: None,
             cancel,
             check: true,
             deadline: Instant::now() + Duration::from_secs(3),
@@ -124,6 +129,55 @@ impl Actions {
             kind,
             path,
             child_name,
+            branch: None,
+            cancel,
+            check: false,
+            deadline: Instant::now() + Duration::from_secs(30),
+        });
+    }
+    pub fn start_branch_list(&self, id: WorkId, path: PathBuf, cancel: CancelToken) {
+        self.submit(Request {
+            id,
+            kind: ActionKind::ListBranches,
+            path,
+            child_name: None,
+            branch: None,
+            cancel,
+            check: true,
+            deadline: Instant::now() + Duration::from_secs(3),
+        });
+    }
+    pub fn start_branch_check(
+        &self,
+        id: WorkId,
+        path: PathBuf,
+        branch: OsString,
+        cancel: CancelToken,
+    ) {
+        self.submit(Request {
+            id,
+            kind: ActionKind::OpenBranchWorkspace,
+            path,
+            child_name: None,
+            branch: Some(branch),
+            cancel,
+            check: true,
+            deadline: Instant::now() + Duration::from_secs(3),
+        });
+    }
+    pub fn start_branch_run(
+        &self,
+        id: WorkId,
+        path: PathBuf,
+        branch: OsString,
+        cancel: CancelToken,
+    ) {
+        self.submit(Request {
+            id,
+            kind: ActionKind::OpenBranchWorkspace,
+            path,
+            child_name: None,
+            branch: Some(branch),
             cancel,
             check: false,
             deadline: Instant::now() + Duration::from_secs(30),
@@ -154,6 +208,13 @@ struct Prepared {
     path: PathBuf,
     git: Option<PathBuf>,
     tool: Option<PathBuf>,
+    branch: Option<OsString>,
+    branch_mode: Option<BranchWorkspaceMode>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BranchWorkspaceMode {
+    Open,
+    New,
 }
 struct Worker {
     environment: BTreeMap<OsString, OsString>,
@@ -169,11 +230,13 @@ impl Worker {
         if let Err(message) = validate_directory(&request.path) {
             return ActionOutcome::InvalidTarget { message };
         }
-        if matches!(request.kind, ActionKind::OpenHd | ActionKind::OpenPane)
-            && request
-                .path
-                .to_str()
-                .is_none_or(|p| p.contains(['\r', '\n']))
+        if matches!(
+            request.kind,
+            ActionKind::OpenHd | ActionKind::OpenPane | ActionKind::OpenBranchWorkspace
+        ) && request
+            .path
+            .to_str()
+            .is_none_or(|p| p.contains(['\r', '\n']))
         {
             return failed("hd/Herdr require a UTF-8 path without CR or LF", false);
         }
@@ -217,10 +280,18 @@ impl Worker {
             path: request.path.clone(),
             git: None,
             tool: None,
+            branch: None,
+            branch_mode: None,
         };
         let mut confirmation = None;
         let mut already_done = false;
-        if matches!(request.kind, ActionKind::GitInit | ActionKind::OpenHd) {
+        if matches!(
+            request.kind,
+            ActionKind::GitInit
+                | ActionKind::OpenHd
+                | ActionKind::ListBranches
+                | ActionKind::OpenBranchWorkspace
+        ) {
             let injected: Vec<_> = self
                 .environment
                 .keys()
@@ -316,6 +387,49 @@ impl Worker {
                 if !root.is_absolute() {
                     return failed("Git returned an invalid root", false);
                 }
+                if request.kind == ActionKind::ListBranches {
+                    return match self.branch_entries(&git, request) {
+                        Ok(branches) => ActionOutcome::BranchesLoaded { branches },
+                        Err(outcome) => outcome,
+                    };
+                }
+                if request.kind == ActionKind::OpenBranchWorkspace {
+                    let Some(branch) = request.branch.as_ref() else {
+                        return failed("A branch is required", false);
+                    };
+                    if branch.as_bytes().contains(&0) {
+                        return failed("Branch name contains a NUL byte", false);
+                    }
+                    let branches = match self.branch_entries(&git, request) {
+                        Ok(branches) => branches,
+                        Err(outcome) => return outcome,
+                    };
+                    let Some(entry) = branches.into_iter().find(|entry| entry.name == *branch)
+                    else {
+                        return failed(
+                            format!(
+                                "Branch {} no longer exists; reopen the branch picker",
+                                display_os(branch.as_os_str())
+                            ),
+                            false,
+                        );
+                    };
+                    if entry.stale_worktree {
+                        return failed(
+                            format!(
+                                "Branch {} has stale worktree metadata; run git worktree prune",
+                                display_os(branch.as_os_str())
+                            ),
+                            false,
+                        );
+                    }
+                    prepared.branch = Some(branch.clone());
+                    prepared.branch_mode = Some(if entry.worktree.is_some() {
+                        BranchWorkspaceMode::Open
+                    } else {
+                        BranchWorkspaceMode::New
+                    });
+                }
                 if request.kind == ActionKind::GitInit {
                     already_done = root == request.path;
                     if !already_done {
@@ -336,8 +450,18 @@ impl Worker {
                         false,
                     );
                 }
-                if request.kind == ActionKind::OpenHd {
-                    return failed("hd requires a Git repository; use Ctrl-P or Ctrl-G", false);
+                if matches!(
+                    request.kind,
+                    ActionKind::OpenHd | ActionKind::ListBranches | ActionKind::OpenBranchWorkspace
+                ) {
+                    return failed(
+                        if request.kind == ActionKind::OpenHd {
+                            "hd requires a Git repository; use Ctrl-P or Ctrl-G"
+                        } else {
+                            "Branch workspace requires a Git repository"
+                        },
+                        false,
+                    );
                 }
                 confirmation = Some(format!(
                     "Initialize a Git repository in {}?",
@@ -345,7 +469,10 @@ impl Worker {
                 ));
             }
             prepared.git = Some(git);
-            if request.kind == ActionKind::OpenHd {
+            if matches!(
+                request.kind,
+                ActionKind::OpenHd | ActionKind::OpenBranchWorkspace
+            ) {
                 prepared.tool = match find_executable("hd", &self.environment) {
                     Ok(p) => Some(p),
                     Err(e) => return failed(e, false),
@@ -363,6 +490,74 @@ impl Worker {
             already_done,
         }
     }
+
+    fn branch_entries(
+        &self,
+        git: &Path,
+        request: &Request,
+    ) -> Result<Vec<BranchEntry>, ActionOutcome> {
+        let refs = self.command(
+            git,
+            &[
+                OsStr::new("for-each-ref"),
+                OsStr::new("--format=%(refname)%00"),
+                OsStr::new("refs/heads"),
+            ],
+            request,
+            Duration::from_secs(3),
+            false,
+        )?;
+        if !refs.status.success() || refs.truncated {
+            return Err(failed(
+                format!("Cannot list Git branches: {}", refs.diagnostic()),
+                false,
+            ));
+        }
+        let names: Vec<OsString> = refs
+            .stdout
+            .split(|byte| *byte == 0)
+            .map(|name| name.strip_prefix(b"\n").unwrap_or(name))
+            .filter_map(|name| name.strip_prefix(b"refs/heads/"))
+            .filter(|name| !name.is_empty())
+            .map(|name| OsString::from_vec(name.to_vec()))
+            .collect();
+        let worktrees = self.command(
+            git,
+            &[
+                OsStr::new("worktree"),
+                OsStr::new("list"),
+                OsStr::new("--porcelain"),
+                OsStr::new("-z"),
+            ],
+            request,
+            Duration::from_secs(3),
+            false,
+        )?;
+        if !worktrees.status.success() || worktrees.truncated {
+            return Err(failed(
+                format!("Cannot list Git worktrees: {}", worktrees.diagnostic()),
+                false,
+            ));
+        }
+        let locations = parse_worktrees(&worktrees.stdout);
+        let mut branches: Vec<_> = names
+            .into_iter()
+            .map(|name| {
+                let stale_worktree = locations.get(&name).is_some_and(|info| info.stale);
+                BranchEntry {
+                    worktree: locations
+                        .get(&name)
+                        .filter(|info| !info.stale)
+                        .map(|info| info.path.clone()),
+                    stale_worktree,
+                    name,
+                }
+            })
+            .collect();
+        branches.sort_by(|left, right| left.name.cmp(&right.name));
+        Ok(branches)
+    }
+
     fn run(&mut self, request: &Request) -> ActionOutcome {
         if request.kind == ActionKind::Mkdir {
             let Some(name) = &request.child_name else {
@@ -383,11 +578,12 @@ impl Worker {
                 Err(e) => failed(format!("Cannot create directory: {e}"), false),
             };
         }
-        let Some(prepared) = self
-            .prepared
-            .take()
-            .filter(|p| p.id == request.id && p.kind == request.kind && p.path == request.path)
-        else {
+        let Some(prepared) = self.prepared.take().filter(|p| {
+            p.id == request.id
+                && p.kind == request.kind
+                && p.path == request.path
+                && p.branch == request.branch
+        }) else {
             return failed("Action has no matching completed precheck", false);
         };
         let (executable, args, duration): (&Path, Vec<&OsStr>, Duration) = match request.kind {
@@ -401,6 +597,24 @@ impl Worker {
                 Vec::new(),
                 Duration::from_secs(30),
             ),
+            ActionKind::OpenBranchWorkspace => {
+                let mode = prepared
+                    .branch_mode
+                    .expect("branch workspace precheck sets a mode");
+                let branch = prepared
+                    .branch
+                    .as_ref()
+                    .expect("branch workspace precheck keeps the branch");
+                let command = match mode {
+                    BranchWorkspaceMode::Open => OsStr::new("open"),
+                    BranchWorkspaceMode::New => OsStr::new("new"),
+                };
+                (
+                    prepared.tool.as_ref().unwrap(),
+                    vec![command, branch.as_os_str()],
+                    Duration::from_secs(30),
+                )
+            }
             ActionKind::OpenPane => (
                 prepared.tool.as_ref().unwrap(),
                 vec![
@@ -415,7 +629,7 @@ impl Worker {
                 ],
                 Duration::from_secs(10),
             ),
-            _ => {
+            ActionKind::ChangeDirectory | ActionKind::ListBranches | ActionKind::Mkdir => {
                 return failed(
                     "Change-directory results are handled by the shell boundary",
                     false,
@@ -444,6 +658,48 @@ fn failed(message: impl Into<String>, uncertain: bool) -> ActionOutcome {
         uncertain,
     }
 }
+
+struct WorktreeInfo {
+    path: PathBuf,
+    stale: bool,
+}
+
+fn parse_worktrees(output: &[u8]) -> BTreeMap<OsString, WorktreeInfo> {
+    let mut locations = BTreeMap::new();
+    let mut worktree = None;
+    let mut branch = None;
+    let mut stale = false;
+    let mut finish =
+        |worktree: &mut Option<PathBuf>, branch: &mut Option<OsString>, stale: &mut bool| {
+            if let (Some(path), Some(name)) = (worktree.take(), branch.take()) {
+                locations.insert(
+                    name,
+                    WorktreeInfo {
+                        stale: *stale || !path.is_dir(),
+                        path,
+                    },
+                );
+            } else {
+                worktree.take();
+                branch.take();
+            }
+            *stale = false;
+        };
+    for field in output.split(|byte| *byte == 0) {
+        if field.is_empty() {
+            finish(&mut worktree, &mut branch, &mut stale);
+        } else if let Some(path) = field.strip_prefix(b"worktree ") {
+            worktree = Some(PathBuf::from(OsString::from_vec(path.to_vec())));
+        } else if let Some(name) = field.strip_prefix(b"branch refs/heads/") {
+            branch = Some(OsString::from_vec(name.to_vec()));
+        } else if field.starts_with(b"prunable") {
+            stale = true;
+        }
+    }
+    finish(&mut worktree, &mut branch, &mut stale);
+    locations
+}
+
 fn find_executable(
     name: &str,
     environment: &BTreeMap<OsString, OsString>,

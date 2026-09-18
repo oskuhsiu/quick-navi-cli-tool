@@ -1,6 +1,6 @@
 //! Shared domain values. Paths are never reconstructed from presentation text.
 use std::collections::BTreeMap;
-use std::ffi::OsStr;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::sync::{
     Arc,
@@ -126,6 +126,63 @@ pub enum ActionKind {
     GitInit,
     OpenHd,
     OpenPane,
+    ListBranches,
+    OpenBranchWorkspace,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchEntry {
+    pub name: OsString,
+    pub worktree: Option<PathBuf>,
+    pub stale_worktree: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchPickerPhase {
+    Loading,
+    Ready,
+}
+
+#[derive(Clone, Debug)]
+pub struct BranchPicker {
+    pub id: WorkId,
+    pub source: NodeKey,
+    pub target: PathBuf,
+    pub phase: BranchPickerPhase,
+    pub branches: Vec<BranchEntry>,
+    pub query: String,
+    pub selected: usize,
+    pub cancel: CancelToken,
+}
+
+impl BranchPicker {
+    pub fn visible_indices(&self) -> Vec<usize> {
+        let query = self.query.to_lowercase();
+        self.branches
+            .iter()
+            .enumerate()
+            .filter(|(_, branch)| {
+                query.is_empty()
+                    || display_os(branch.name.as_os_str())
+                        .to_lowercase()
+                        .contains(&query)
+            })
+            .map(|(index, _)| index)
+            .collect()
+    }
+
+    pub fn selected_entry(&self) -> Option<&BranchEntry> {
+        self.visible_indices()
+            .get(self.selected)
+            .and_then(|index| self.branches.get(*index))
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct BranchSelection {
+    pub source: NodeKey,
+    pub target: PathBuf,
+    pub branch: OsString,
 }
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ActionPhase {
@@ -143,6 +200,7 @@ pub struct ActionRequest {
     pub target: PathBuf,
     pub phase: ActionPhase,
     pub child_name: Option<String>,
+    pub branch: Option<OsString>,
     pub cancel: CancelToken,
 }
 #[derive(Clone, Debug, Default)]

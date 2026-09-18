@@ -20,6 +20,7 @@ use qnav::{
     ui,
 };
 use std::{
+    ffi::OsString,
     io::{self, IsTerminal, Write},
     path::PathBuf,
     sync::mpsc,
@@ -40,8 +41,19 @@ fn options() -> Result<Option<Options>, String> {
                 let checkout = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
                 let bash_wrapper = display_path(&checkout.join("shell/qnav.bash"));
                 let zsh_wrapper = display_path(&checkout.join("shell/qnav.zsh"));
-                println!(
+                let help = format!(
                     "qnav — terminal directory columns\n\nUsage: qnav [--config PATH]\n\nEnter changes the CALLING shell's directory, so it needs a shell function.\ncargo install installs the binary only; it does not set up your shell.\nAfter leaving qnav with Ctrl-C, source ONE wrapper for your shell:\n  Bash wrapper: {bash_wrapper}\n  Zsh wrapper:  {zsh_wrapper}\nUse: source '<absolute wrapper path>', then run qnav again.\nThese files are in this build's source checkout; if moved, use its new location.\nWithout shell setup, browsing, hd, pane, mkdir and git init still work.\n\n↑↓ select  ←→ columns  [ ] depth (1–9, default 3)  type to filter\nTab browse match  Esc clear/cancel  Ctrl-C exit\nMouse: left-click selects; wheel moves selection in hovered list\nEnter cd  Ctrl-O hd  Ctrl-P Herdr pane\nCtrl-A add root  Ctrl-N mkdir  Ctrl-G git init\nCtrl-R refresh branch  Ctrl-L reload all roots\n\nNo automatic roots, profile edits, background daemon, or symlink traversal."
+                );
+                println!(
+                    "{}",
+                    help.replace(
+                        "Ctrl-O hd  Ctrl-P Herdr pane",
+                        "Ctrl-O hd  Ctrl-B branch workspace  Ctrl-P Herdr pane",
+                    )
+                    .replace(
+                        "Without shell setup, browsing, hd, pane, mkdir and git init still work.",
+                        "Without shell setup, browsing, hd, branch workspace, pane, mkdir and git init still work.",
+                    )
                 );
                 return Ok(None);
             }
@@ -116,8 +128,25 @@ struct Runtime {
     exiting: bool,
     exit_code: i32,
     cd_path: Option<PathBuf>,
-    uncertain: Vec<(ActionKind, PathBuf)>,
+    uncertain: Vec<ActionIdentity>,
     retry_confirm: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct ActionIdentity {
+    kind: ActionKind,
+    target: PathBuf,
+    branch: Option<OsString>,
+}
+
+impl ActionIdentity {
+    fn from_request(action: &ActionRequest) -> Self {
+        Self {
+            kind: action.kind,
+            target: action.target.clone(),
+            branch: action.branch.clone(),
+        }
+    }
 }
 impl Runtime {
     fn new(options: Options) -> Result<Self, String> {
@@ -155,6 +184,7 @@ impl Runtime {
             self.exiting = true;
             self.exit_code = 130;
             self.app.add_root = None;
+            self.app.cancel_branch_picker();
             if let Some(a) = &mut self.app.pending_action {
                 match a.phase {
                     ActionPhase::Input(_) | ActionPhase::Confirm { .. } => {
@@ -165,6 +195,48 @@ impl Runtime {
                         a.phase = ActionPhase::Cancelling;
                     }
                 }
+            }
+            return;
+        }
+        if self.app.branch_picker.is_some() {
+            match key.code {
+                KeyCode::Esc => {
+                    if self.app.cancel_branch_picker() {
+                        self.app.status = "Branch picker cancelled".into();
+                    }
+                }
+                KeyCode::Up => {
+                    self.app.move_branch_picker(false);
+                }
+                KeyCode::Down => {
+                    self.app.move_branch_picker(true);
+                }
+                KeyCode::Backspace | KeyCode::Delete => {
+                    let mut query = self
+                        .app
+                        .branch_picker
+                        .as_ref()
+                        .map(|picker| picker.query.clone())
+                        .unwrap_or_default();
+                    query.pop();
+                    self.app.edit_branch_picker(query);
+                }
+                KeyCode::Enter => self.select_branch_workspace(),
+                KeyCode::Char(c)
+                    if !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    let mut query = self
+                        .app
+                        .branch_picker
+                        .as_ref()
+                        .map(|picker| picker.query.clone())
+                        .unwrap_or_default();
+                    query.push(c);
+                    self.app.edit_branch_picker(query);
+                }
+                _ => {}
             }
             return;
         }
@@ -279,6 +351,7 @@ impl Runtime {
                 KeyCode::Char('g') => self.start_action(ActionKind::GitInit),
                 KeyCode::Char('o') => self.start_action(ActionKind::OpenHd),
                 KeyCode::Char('p') => self.start_action(ActionKind::OpenPane),
+                KeyCode::Char('b') => self.start_branch_picker(),
                 _ => {}
             }
             return;
@@ -320,6 +393,7 @@ impl Runtime {
         if self.exiting
             || self.config_busy
             || self.app.add_root.is_some()
+            || self.app.branch_picker.is_some()
             || self.app.pending_action.as_ref().is_some_and(|action| {
                 matches!(
                     action.phase,
@@ -373,6 +447,10 @@ impl Runtime {
             input.push_str(&text);
             return;
         }
+        if self.app.branch_picker.is_some() {
+            self.app.paste_branch_picker(&text);
+            return;
+        }
         if let Some(a) = &mut self.app.pending_action {
             if let ActionPhase::Input(input) = &mut a.phase {
                 input.push_str(&text);
@@ -390,10 +468,55 @@ impl Runtime {
             return;
         }
         let a = self.app.pending_action.as_mut().unwrap();
-        if self.uncertain.contains(&(kind, a.target.clone())) {
+        let identity = ActionIdentity::from_request(a);
+        if self.uncertain.contains(&identity) {
             a.phase=ActionPhase::Confirm{message:"Previous result was not confirmed and may already have taken effect. Retry may duplicate the operation.".into(),accepted:false};
             self.retry_confirm = true;
         } else {
+            self.check_action();
+        }
+    }
+    fn start_branch_picker(&mut self) {
+        let Some(id) = self.app.start_branch_picker() else {
+            self.app.status =
+                "Select a valid directory; only one action or picker can run at a time".into();
+            return;
+        };
+        let picker = self.app.branch_picker.as_ref().unwrap();
+        self.app.status = format!(
+            "Loading branches: {} · Esc cancel",
+            display_path(&picker.target)
+        );
+        self.actions
+            .start_branch_list(id, picker.target.clone(), picker.cancel.clone());
+    }
+    fn select_branch_workspace(&mut self) {
+        let Some(selection) = self.app.take_branch_selection() else {
+            if self
+                .app
+                .branch_picker
+                .as_ref()
+                .is_some_and(|picker| picker.phase == BranchPickerPhase::Ready)
+            {
+                self.app.status = "No matching branch selected".into();
+            }
+            return;
+        };
+        let branch = display_os(selection.branch.as_os_str());
+        if self.app.freeze_branch_action(selection).is_none() {
+            self.app.status = "Cannot start branch workspace action".into();
+            return;
+        }
+        let action = self.app.pending_action.as_mut().unwrap();
+        let identity = ActionIdentity::from_request(action);
+        if self.uncertain.contains(&identity) {
+            action.phase = ActionPhase::Confirm {
+                message: "Previous result was not confirmed and may already have taken effect. Retry may duplicate the operation.".into(),
+                accepted: false,
+            };
+            self.retry_confirm = true;
+        } else {
+            self.app.status = format!("Checking branch workspace: {branch} · Esc cancel");
             self.check_action();
         }
     }
@@ -405,22 +528,76 @@ impl Runtime {
             a.kind,
             display_path(&a.target)
         );
-        self.actions
-            .start_check(a.id, a.kind, a.target.clone(), a.cancel.clone());
+        if a.kind == ActionKind::OpenBranchWorkspace {
+            if let Some(branch) = a.branch.clone() {
+                self.actions
+                    .start_branch_check(a.id, a.target.clone(), branch, a.cancel.clone());
+            } else {
+                self.app.status = "Branch selection is missing".into();
+                self.app.pending_action = None;
+            }
+        } else {
+            self.actions
+                .start_check(a.id, a.kind, a.target.clone(), a.cancel.clone());
+        }
     }
     fn run_action(&mut self) {
         let a = self.app.pending_action.as_mut().unwrap();
         a.phase = ActionPhase::Running;
         self.app.status = format!("Running {:?}: {}", a.kind, display_path(&a.target));
-        self.actions.start_run(
-            a.id,
-            a.kind,
-            a.target.clone(),
-            a.child_name.clone(),
-            a.cancel.clone(),
-        );
+        if a.kind == ActionKind::OpenBranchWorkspace {
+            if let Some(branch) = a.branch.clone() {
+                self.actions
+                    .start_branch_run(a.id, a.target.clone(), branch, a.cancel.clone());
+            } else {
+                self.app.status = "Branch selection is missing".into();
+                self.app.pending_action = None;
+            }
+        } else {
+            self.actions.start_run(
+                a.id,
+                a.kind,
+                a.target.clone(),
+                a.child_name.clone(),
+                a.cancel.clone(),
+            );
+        }
     }
     fn action_event(&mut self, event: ActionEvent) {
+        if self
+            .app
+            .branch_picker
+            .as_ref()
+            .is_some_and(|picker| picker.id == event.id)
+        {
+            match event.outcome {
+                ActionOutcome::BranchesLoaded { branches } => {
+                    self.app.set_branch_picker_entries(event.id, branches);
+                    self.app.status = "Select branch · ↑↓ select · Enter open · Esc cancel".into();
+                }
+                ActionOutcome::InvalidTarget { message } => {
+                    let picker = self.app.branch_picker.take().unwrap();
+                    self.app.mark_unavailable(&picker.target, &message);
+                    self.app.status = format!(
+                        "Target unavailable: {} — {message}",
+                        display_path(&picker.target)
+                    );
+                }
+                ActionOutcome::Failed { message, .. } => {
+                    self.app.branch_picker = None;
+                    self.app.status = message;
+                }
+                ActionOutcome::Cancelled { .. } => {
+                    self.app.branch_picker = None;
+                    self.app.status = "Branch picker cancelled".into();
+                }
+                ActionOutcome::Checked { .. } | ActionOutcome::Completed { .. } => {
+                    self.app.branch_picker = None;
+                    self.app.status = "Branch picker received an unexpected result".into();
+                }
+            }
+            return;
+        }
         let Some(a) = self.app.pending_action.as_ref() else {
             return;
         };
@@ -447,7 +624,7 @@ impl Runtime {
                             ..
                         }
                 ) {
-                    let identity = (a.kind, a.target.clone());
+                    let identity = ActionIdentity::from_request(a);
                     if !self.uncertain.contains(&identity) {
                         self.uncertain.push(identity);
                     }
@@ -459,6 +636,10 @@ impl Runtime {
             return;
         }
         match event.outcome {
+            ActionOutcome::BranchesLoaded { .. } => {
+                self.app.pending_action = None;
+                self.app.status = "Branch list arrived after the picker closed".into();
+            }
             ActionOutcome::InvalidTarget { message } => {
                 let a = self.app.pending_action.take().unwrap();
                 self.app.mark_unavailable(&a.target, &message);
@@ -500,12 +681,12 @@ impl Runtime {
                     self.app.status = message;
                 }
                 self.uncertain
-                    .retain(|(k, p)| *k != a.kind || *p != a.target);
+                    .retain(|identity| *identity != ActionIdentity::from_request(&a));
             }
             ActionOutcome::Failed { message, uncertain } => {
                 let a = self.app.pending_action.as_mut().unwrap();
                 if uncertain {
-                    let identity = (a.kind, a.target.clone());
+                    let identity = ActionIdentity::from_request(a);
                     if !self.uncertain.contains(&identity) {
                         self.uncertain.push(identity);
                     }
@@ -528,7 +709,7 @@ impl Runtime {
             ActionOutcome::Cancelled { uncertain } => {
                 let a = self.app.pending_action.take().unwrap();
                 if uncertain {
-                    let identity = (a.kind, a.target);
+                    let identity = ActionIdentity::from_request(&a);
                     if !self.uncertain.contains(&identity) {
                         self.uncertain.push(identity);
                     }
@@ -605,8 +786,10 @@ fn run(options: Options) -> Result<i32, String> {
             execute!(io::stdout(), EndSynchronizedUpdate).map_err(|e| e.to_string())?;
             dirty = false;
         }
-        let busy =
-            runtime.app.working() || runtime.app.pending_action.is_some() || runtime.config_busy;
+        let busy = runtime.app.working()
+            || runtime.app.pending_action.is_some()
+            || runtime.app.branch_picker.is_some()
+            || runtime.config_busy;
         let wait_ms = if runtime.app.matching_in_progress() {
             0
         } else if busy {
@@ -830,6 +1013,80 @@ mod tests {
         });
         rt.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
         assert!(rt.app.pending_action.is_none());
+    }
+    #[test]
+    fn branch_picker_escape_cancels_without_starting_an_action() {
+        let (mut rt, _tmp) = runtime();
+        rt.app.move_vertical(true);
+        let target = rt.app.target();
+        assert!(rt.app.start_branch_picker().is_some());
+        let cancel = rt.app.branch_picker.as_ref().unwrap().cancel.clone();
+        rt.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
+        assert!(cancel.is_cancelled());
+        assert!(rt.app.branch_picker.is_none());
+        assert!(rt.app.pending_action.is_none());
+        assert_eq!(rt.app.target(), target);
+    }
+    #[test]
+    fn branch_picker_enter_closes_picker_before_checking_selected_branch() {
+        let (mut rt, _tmp) = runtime();
+        rt.app.move_vertical(true);
+        let id = rt.app.start_branch_picker().unwrap();
+        rt.app.set_branch_picker_entries(
+            id,
+            vec![BranchEntry {
+                name: "feature/demo".into(),
+                worktree: None,
+                stale_worktree: false,
+            }],
+        );
+        rt.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(rt.app.branch_picker.is_none());
+        let action = rt.app.pending_action.as_ref().unwrap();
+        assert_eq!(action.kind, ActionKind::OpenBranchWorkspace);
+        assert_eq!(action.branch.as_deref(), Some("feature/demo".as_ref()));
+        assert_eq!(action.phase, ActionPhase::Checking);
+    }
+    #[test]
+    fn uncertain_branch_workspace_requires_confirmation_before_retry() {
+        let (mut rt, _tmp) = runtime();
+        rt.app.move_vertical(true);
+        let source = rt.app.target().unwrap();
+        let target = rt.app.path(&source).unwrap();
+        let id = rt
+            .app
+            .freeze_branch_action(BranchSelection {
+                source: source.clone(),
+                target: target.clone(),
+                branch: "feature/demo".into(),
+            })
+            .unwrap();
+        rt.action_event(ActionEvent {
+            id,
+            outcome: ActionOutcome::Failed {
+                message: "workspace result was lost".into(),
+                uncertain: true,
+            },
+        });
+        assert!(rt.app.pending_action.is_none());
+        let picker_id = rt.app.start_branch_picker().unwrap();
+        rt.app.set_branch_picker_entries(
+            picker_id,
+            vec![BranchEntry {
+                name: "feature/demo".into(),
+                worktree: None,
+                stale_worktree: false,
+            }],
+        );
+        rt.key(KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE));
+        assert!(matches!(
+            rt.app.pending_action.as_ref().map(|action| &action.phase),
+            Some(ActionPhase::Confirm {
+                accepted: false,
+                ..
+            })
+        ));
+        assert!(rt.retry_confirm);
     }
     #[test]
     fn failed_directory_validation_disables_the_cached_target() {

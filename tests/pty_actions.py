@@ -3,6 +3,7 @@
 import argparse
 import os
 from pathlib import Path
+import subprocess
 import sys
 import tempfile
 
@@ -49,6 +50,13 @@ def run(binary):
             terminal.contains("[x] Cancel")
             terminal.send(RIGHT + b"\r")
             terminal.wait(lambda: (project / ".git").is_dir() and "Action completed" in terminal.screen.text(), "confirmed real git init")
+            (project / "README").write_text("branch fixture\n")
+            subprocess.run(["git", "-C", str(project), "add", "README"], check=True, env=env)
+            subprocess.run([
+                "git", "-C", str(project), "-c", "user.name=Test", "-c",
+                "user.email=test@example.com", "commit", "-qm", "initial",
+            ], check=True, env=env)
+            subprocess.run(["git", "-C", str(project), "branch", "branch-workspace"], check=True, env=env)
             for key, name in ((b"\x0f", "hd"), (b"\x10", "herdr")):
                 terminal.send(key)
                 terminal.wait(lambda: (fixture / (name + ".record")).exists() and "Action completed" in terminal.screen.text(), "retained " + name)
@@ -60,6 +68,20 @@ def run(binary):
                     assert fields[1:-1] == [b"pane", b"split", b"--current", b"--direction", b"right", b"--cwd", os.fsencode(project), b"--focus"]
                 assert terminal.process.poll() is None
                 assert "Target: " + str(project) in terminal.screen.text()
+            before_cancel = (fixture / "hd.record").read_bytes()
+            terminal.send(b"\x02")
+            terminal.contains(" Branch workspace ")
+            terminal.contains("new worktree")
+            terminal.send(b"\x1b")
+            terminal.wait(lambda: " Branch workspace " not in terminal.screen.text(), "branch picker Esc closes")
+            assert (fixture / "hd.record").read_bytes() == before_cancel
+            terminal.send(b"\x02")
+            terminal.contains(" Branch workspace ")
+            terminal.paste("branch-workspace")
+            terminal.contains("branch-workspace")
+            terminal.send(b"\r")
+            terminal.wait(lambda: (fixture / "hd.record").read_bytes().split(b"\0")[1:3] == [b"new", b"branch-workspace"], "branch selection dispatches hd new")
+            assert " Branch workspace " not in terminal.screen.text()
             (commands / "hd").write_text("#!/bin/sh\nprintf '%s' \"$$\" > \"$QNAV_TEST_RECORD/child.pid\"\ntrap '' TERM\nwhile :; do sleep 10; done\n")
             terminal.send(b"\x0f")
             terminal.wait(lambda: (fixture / "child.pid").exists(), "owned blocking hd started")

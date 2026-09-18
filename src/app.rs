@@ -40,6 +40,7 @@ pub struct App {
     pub candidate_version: u64,
     pub work_ids: WorkIds,
     pub pending_action: Option<ActionRequest>,
+    pub branch_picker: Option<BranchPicker>,
     pub add_root: Option<String>,
     pub restore: Option<RestoreIntent>,
     pub status: String,
@@ -72,6 +73,7 @@ impl App {
             candidate_version: 0,
             work_ids: WorkIds::default(),
             pending_action: None,
+            branch_picker: None,
             add_root: None,
             restore: None,
             status: String::new(),
@@ -116,7 +118,7 @@ impl App {
         }
     }
     pub fn scope_locked(&self) -> bool {
-        self.pending_action.is_some() || self.add_root.is_some()
+        self.pending_action.is_some() || self.branch_picker.is_some() || self.add_root.is_some()
     }
     pub fn browse_projection(&self) -> BrowseState {
         match &self.navigation {
@@ -548,6 +550,106 @@ impl App {
             format!("{message}; outside depth or excluded — staying at parent")
         };
     }
+
+    pub fn start_branch_picker(&mut self) -> Option<WorkId> {
+        if self.scope_locked() {
+            return None;
+        }
+        let source = self.target()?;
+        let target = self.path(&source)?;
+        let id = self.work_ids.allocate()?;
+        self.branch_picker = Some(BranchPicker {
+            id,
+            source,
+            target,
+            phase: BranchPickerPhase::Loading,
+            branches: Vec::new(),
+            query: String::new(),
+            selected: 0,
+            cancel: CancelToken::default(),
+        });
+        Some(id)
+    }
+
+    pub fn set_branch_picker_entries(&mut self, id: WorkId, branches: Vec<BranchEntry>) -> bool {
+        let Some(picker) = &mut self.branch_picker else {
+            return false;
+        };
+        if picker.id != id {
+            return false;
+        }
+        picker.branches = branches;
+        picker.phase = BranchPickerPhase::Ready;
+        picker.selected = 0;
+        true
+    }
+
+    pub fn edit_branch_picker(&mut self, query: String) -> bool {
+        let Some(picker) = &mut self.branch_picker else {
+            return false;
+        };
+        if picker.phase != BranchPickerPhase::Ready {
+            return false;
+        }
+        picker.query = query;
+        picker.selected = 0;
+        true
+    }
+
+    pub fn paste_branch_picker(&mut self, text: &str) -> bool {
+        if text.chars().any(char::is_control) {
+            self.status = "Paste rejected: branch filter must be a single line".into();
+            return false;
+        }
+        let Some(picker) = &mut self.branch_picker else {
+            return false;
+        };
+        if picker.phase != BranchPickerPhase::Ready {
+            return false;
+        }
+        picker.query.push_str(text);
+        picker.selected = 0;
+        true
+    }
+
+    pub fn move_branch_picker(&mut self, down: bool) -> bool {
+        let Some(picker) = &mut self.branch_picker else {
+            return false;
+        };
+        if picker.phase != BranchPickerPhase::Ready {
+            return false;
+        }
+        let visible = picker.visible_indices();
+        if let Some(index) = move_index(visible.len(), Some(picker.selected), down) {
+            picker.selected = index;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn cancel_branch_picker(&mut self) -> bool {
+        let Some(picker) = self.branch_picker.take() else {
+            return false;
+        };
+        picker.cancel.cancel();
+        true
+    }
+
+    pub fn take_branch_selection(&mut self) -> Option<BranchSelection> {
+        let picker = self.branch_picker.as_ref()?;
+        if picker.phase != BranchPickerPhase::Ready {
+            return None;
+        }
+        let branch = picker.selected_entry()?.name.clone();
+        let selection = BranchSelection {
+            source: picker.source.clone(),
+            target: picker.target.clone(),
+            branch,
+        };
+        self.branch_picker.take();
+        Some(selection)
+    }
     fn changed(&mut self) {
         self.candidate_version += 1;
         self.matcher = None;
@@ -961,6 +1063,25 @@ impl App {
             target,
             phase: ActionPhase::Checking,
             child_name: None,
+            branch: None,
+            cancel: CancelToken::default(),
+        });
+        Some(id)
+    }
+
+    pub fn freeze_branch_action(&mut self, selection: BranchSelection) -> Option<WorkId> {
+        if self.scope_locked() {
+            return None;
+        }
+        let id = self.work_ids.allocate()?;
+        self.pending_action = Some(ActionRequest {
+            id,
+            kind: ActionKind::OpenBranchWorkspace,
+            source: selection.source,
+            target: selection.target,
+            phase: ActionPhase::Checking,
+            child_name: None,
+            branch: Some(selection.branch),
             cancel: CancelToken::default(),
         });
         Some(id)

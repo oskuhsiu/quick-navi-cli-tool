@@ -53,6 +53,7 @@ fn shortcut_help(width: u16, height: u16) -> Vec<Line<'static>> {
             ("Ctrl+G", "git init"),
             ("Ctrl+R", "refresh branch"),
             ("Ctrl+L", "reload roots"),
+            ("Ctrl+B", "branch"),
         ],
     ];
     let key_style = Style::default().fg(HELP_KEY).add_modifier(Modifier::BOLD);
@@ -260,6 +261,8 @@ pub fn draw(frame: &mut Frame, app: &App) -> HitMap {
             ActionKind::GitInit => "Git init",
             ActionKind::OpenHd => "Open hd",
             ActionKind::OpenPane => "Open shell pane",
+            ActionKind::ListBranches => "List branches",
+            ActionKind::OpenBranchWorkspace => "Open branch workspace",
         };
         match &action.phase {
             ActionPhase::Input(input) => draw_form(
@@ -285,6 +288,10 @@ pub fn draw(frame: &mut Frame, app: &App) -> HitMap {
             ActionPhase::Cancelling => {}
         }
     }
+    if let Some(picker) = &app.branch_picker {
+        draw_branch_picker(frame, picker);
+        hits.regions.clear();
+    }
     if app.add_root.is_some()
         || app.pending_action.as_ref().is_some_and(|action| {
             matches!(
@@ -296,6 +303,73 @@ pub fn draw(frame: &mut Frame, app: &App) -> HitMap {
         hits.regions.clear();
     }
     hits
+}
+
+fn draw_branch_picker(frame: &mut Frame, picker: &BranchPicker) {
+    let screen = frame.area();
+    let width = screen.width.saturating_sub(4).clamp(20, 100);
+    let height = screen.height.saturating_sub(4).clamp(6, 24);
+    let rect = Rect::new(
+        screen.x + screen.width.saturating_sub(width) / 2,
+        screen.y + screen.height.saturating_sub(height) / 2,
+        width.min(screen.width),
+        height.min(screen.height),
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .title(" Branch workspace ")
+        .border_style(Style::default().fg(ACCENT));
+    let inner = block.inner(rect);
+    frame.render_widget(Clear, rect);
+    frame.render_widget(block, rect);
+    let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    frame.render_widget(
+        Paragraph::new(format!("Filter: {}▏", display_os(picker.query.as_ref()))),
+        parts[0],
+    );
+    if picker.phase == BranchPickerPhase::Loading {
+        frame.render_widget(Paragraph::new("Loading branches…  Esc cancel"), parts[1]);
+        return;
+    }
+    let visible = picker.visible_indices();
+    if visible.is_empty() {
+        frame.render_widget(Paragraph::new("No matching branches\nEsc cancel"), parts[1]);
+        return;
+    }
+    let selected = picker.selected.min(visible.len().saturating_sub(1));
+    let height = parts[1].height as usize;
+    let offset = selected
+        .saturating_sub(height.saturating_sub(1) / 2)
+        .min(visible.len().saturating_sub(height));
+    let rows = visible
+        .iter()
+        .skip(offset)
+        .take(height)
+        .map(|index| {
+            let branch = &picker.branches[*index];
+            let state = if branch.stale_worktree {
+                "stale worktree metadata".into()
+            } else {
+                branch
+                    .worktree
+                    .as_ref()
+                    .map(|path| format!("worktree {}", display_path(path)))
+                    .unwrap_or_else(|| "new worktree".into())
+            };
+            ListItem::new(format!(
+                "{}  · {state}",
+                display_os(branch.name.as_os_str())
+            ))
+        })
+        .collect::<Vec<_>>();
+    let list = List::new(rows)
+        .highlight_symbol("> ")
+        .highlight_style(Style::default().fg(ACCENT));
+    frame.render_stateful_widget(
+        list,
+        parts[1],
+        &mut ListState::default().with_selected(Some(selected - offset)),
+    );
 }
 
 fn draw_columns(

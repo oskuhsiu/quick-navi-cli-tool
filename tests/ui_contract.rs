@@ -28,6 +28,7 @@ fn shortcut_help_is_bold_high_contrast_and_complete_in_narrow_panes() {
         for command in [
             "Enter cd",
             "Ctrl+O hd",
+            "Ctrl+B branch",
             "Ctrl+P pane",
             "Ctrl+C exit",
             "Ctrl+A add root",
@@ -57,6 +58,46 @@ fn shortcut_help_is_bold_high_contrast_and_complete_in_narrow_panes() {
         );
         assert!(help_cells.iter().all(|cell| cell.fg != Color::DarkGray));
     }
+}
+
+#[test]
+fn branch_picker_overlay_shows_worktree_state_and_blocks_background_hits() {
+    let mut app = App::new(
+        vec![RootEntry {
+            id: 1,
+            path: "/work/repo".into(),
+        }],
+        ExplorationPolicy { home: None },
+    );
+    app.move_vertical(true);
+    let id = app.start_branch_picker().unwrap();
+    app.set_branch_picker_entries(
+        id,
+        vec![
+            BranchEntry {
+                name: "main".into(),
+                worktree: Some("/work/repo".into()),
+                stale_worktree: false,
+            },
+            BranchEntry {
+                name: "feature/demo".into(),
+                worktree: None,
+                stale_worktree: false,
+            },
+        ],
+    );
+    let (hits, terminal) = render_hits(&app, 100, 24);
+    let text = terminal
+        .backend()
+        .buffer()
+        .content()
+        .iter()
+        .map(|cell| cell.symbol())
+        .collect::<String>();
+    assert!(text.contains("Branch workspace"));
+    assert!(text.contains("feature/demo"));
+    assert!(text.contains("new worktree"));
+    assert!((0..24).all(|y| (0..100).all(|x| hits.hit(x, y).is_none())));
 }
 
 #[test]
@@ -279,6 +320,7 @@ fn empty_space_small_screens_and_modal_overlays_have_no_row_hits() {
             target: "/root01".into(),
             phase,
             child_name: None,
+            branch: None,
             cancel: CancelToken::default(),
         });
         let (hits, _) = render_hits(&app, 80, 24);
