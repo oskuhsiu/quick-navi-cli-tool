@@ -48,11 +48,15 @@ fn options() -> Result<Option<Options>, String> {
                     "{}",
                     help.replace(
                         "Ctrl-O hd  Ctrl-P Herdr pane",
-                        "Ctrl-O hd  Ctrl-Y branch workspace  Ctrl-P Herdr pane",
+                        "Ctrl-O hd  Ctrl-L branch workspace  Ctrl-P Herdr pane",
                     )
                     .replace(
                         "Without shell setup, browsing, hd, pane, mkdir and git init still work.",
                         "Without shell setup, browsing, hd, branch workspace, pane, mkdir and git init still work.",
+                    )
+                    .replace(
+                        "Ctrl-R refresh branch  Ctrl-L reload all roots",
+                        "Ctrl-R refresh branch  Ctrl-F reload roots",
                     )
                 );
                 return Ok(None);
@@ -338,7 +342,7 @@ impl Runtime {
                     self.app.add_root = Some(String::new())
                 }
                 KeyCode::Char('r') => self.app.refresh_branch(),
-                KeyCode::Char('l') if !self.app.scope_locked() => {
+                KeyCode::Char('f') if !self.app.scope_locked() => {
                     self.config_busy = true;
                     self.app.status = "Reloading roots…".into();
                     let tx = self.config_tx.clone();
@@ -351,7 +355,7 @@ impl Runtime {
                 KeyCode::Char('g') => self.start_action(ActionKind::GitInit),
                 KeyCode::Char('o') => self.start_action(ActionKind::OpenHd),
                 KeyCode::Char('p') => self.start_action(ActionKind::OpenPane),
-                KeyCode::Char('y') => self.start_branch_picker(),
+                KeyCode::Char('l') => self.start_branch_picker(),
                 _ => {}
             }
             return;
@@ -1031,7 +1035,7 @@ mod tests {
     fn branch_picker_shortcut_uses_a_key_outside_herdr_prefix() {
         let (mut rt, _tmp) = runtime();
         rt.app.move_vertical(true);
-        rt.key(KeyEvent::new(KeyCode::Char('y'), KeyModifiers::CONTROL));
+        rt.key(KeyEvent::new(KeyCode::Char('l'), KeyModifiers::CONTROL));
         assert!(rt.app.branch_picker.is_some());
     }
     #[test]

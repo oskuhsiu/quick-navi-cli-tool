@@ -202,7 +202,7 @@ def smoke(binary):
                     compact = "".join(line.strip() for line in target_lines)
                     return str(root / "alpha") in compact or "Resize to read full target:" in terminal.screen.text()
                 terminal.wait(full_target_or_hint, "full selected target or explicit resize hint")
-                for shortcut in ("Ctrl+O hd", "Ctrl+Y branch", "Ctrl+P pane", "Ctrl+C exit", "Ctrl+A add root", "Ctrl+N mkdir", "Ctrl+G git init", "Ctrl+R refresh branch", "Ctrl+L reload roots"):
+                for shortcut in ("Ctrl+O hd", "Ctrl+L branch", "Ctrl+P pane", "Ctrl+C exit", "Ctrl+A add root", "Ctrl+N mkdir", "Ctrl+G git init", "Ctrl+R refresh branch", "Ctrl+F reload roots"):
                     terminal.contains(shortcut, "readable complete shortcut " + shortcut)
                 assert b"38;2;245;247;250" in terminal.output, "missing high-contrast help text"
                 assert b"48;2;24;29;36" in terminal.output, "missing help background"

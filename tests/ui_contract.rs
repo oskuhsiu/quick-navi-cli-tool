@@ -28,14 +28,14 @@ fn shortcut_help_is_bold_high_contrast_and_complete_in_narrow_panes() {
         for command in [
             "Enter cd",
             "Ctrl+O hd",
-            "Ctrl+Y branch",
+            "Ctrl+L branch",
             "Ctrl+P pane",
             "Ctrl+C exit",
             "Ctrl+A add root",
             "Ctrl+N mkdir",
             "Ctrl+G git init",
             "Ctrl+R refresh branch",
-            "Ctrl+L reload roots",
+            "Ctrl+F reload roots",
         ] {
             assert!(
                 footer.lines().any(|line| line.contains(command)),

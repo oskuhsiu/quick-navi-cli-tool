@@ -52,8 +52,8 @@ fn shortcut_help(width: u16, height: u16) -> Vec<Line<'static>> {
             ("Ctrl+N", "mkdir"),
             ("Ctrl+G", "git init"),
             ("Ctrl+R", "refresh branch"),
-            ("Ctrl+L", "reload roots"),
-            ("Ctrl+Y", "branch"),
+            ("Ctrl+F", "reload roots"),
+            ("Ctrl+L", "branch"),
         ],
     ];
     let key_style = Style::default().fg(HELP_KEY).add_modifier(Modifier::BOLD);

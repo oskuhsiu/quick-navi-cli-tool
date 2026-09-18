@@ -71,7 +71,7 @@ the setup.
 3. Use ↑/↓ to select that root. Its immediate directories appear in the next
    column; use → and ↑/↓ to select a project.
 4. Press Enter to exit and `cd` there, or Ctrl+O to open it with your external
-   `hd` while leaving qnav running. Use Ctrl+Y to choose a Git branch and open
+   `hd` while leaving qnav running. Use Ctrl+L to choose a Git branch and open
    its workspace; qnav uses `hd open` for an existing worktree and `hd new`
    when the branch does not have one yet.
 
@@ -96,13 +96,13 @@ fall back to another column's selection.
 | Esc | Clear the filter and restore browsing, or cancel an input/confirmation |
 | Enter | Exit qnav and change the calling shell's directory; requires wrapper |
 | Ctrl+O | Run external `hd` at the target; keep qnav open |
-| Ctrl+Y | Choose a local Git branch and open its workspace; Esc cancels |
+| Ctrl+L | Choose a local Git branch and open its workspace; Esc cancels |
 | Ctrl+P | Open a Herdr shell pane at the target; keep qnav open |
 | Ctrl+A | Add an existing directory as a root |
 | Ctrl+N | Create one child directory under the target |
 | Ctrl+G | Confirm and run `git init` at the target |
 | Ctrl+R | Refresh the branch displayed in the current column |
-| Ctrl+L | Reload roots from configuration and invalidate all cached listings |
+| Ctrl+F | Reload roots from configuration and invalidate all cached listings |
 | Ctrl+C | Exit without changing the calling shell's directory |
 
 Git initialization defaults to **Cancel**; use an arrow to select Continue,
@@ -142,7 +142,7 @@ directory:
 
 - **Ctrl+R** refreshes the current column's parent branch, including new siblings.
   In the root column, it refreshes the selected root.
-- **Ctrl+L** reloads configuration and clears cached listings for all roots;
+- **Ctrl+F** reloads configuration and clears cached listings for all roots;
   needed listings are then read again. It does not immediately crawl everything.
 
 Neither refresh increases the exploration depth. Loading, permission errors,
@@ -196,7 +196,7 @@ Example configuration:
 }
 ```
 
-To remove or reorder roots, edit this file and press Ctrl+L. IDs must be unique
+To remove or reorder roots, edit this file and press Ctrl+F. IDs must be unique
 positive integers; paths must be unique, normalized absolute physical paths.
 Using Ctrl+A is the easiest way to create valid entries.
 
@@ -212,7 +212,7 @@ functions. Plain browsing and Enter do not require either tool.
 
 - **Ctrl+O:** the target must be inside a Git repository. qnav runs your existing
   `hd` there; workspace behavior belongs to that tool.
-- **Ctrl+Y:** the target must be inside a Git repository. qnav lists local
+- **Ctrl+L:** the target must be inside a Git repository. qnav lists local
   branches, shows whether each already has a worktree, and runs `hd open
   <branch>` or `hd new <branch>` after you select one. Esc closes the picker
   without running an external command. Stale Git worktree metadata is shown
