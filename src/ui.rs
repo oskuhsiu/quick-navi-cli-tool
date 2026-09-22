@@ -254,6 +254,10 @@ pub fn draw(frame: &mut Frame, app: &App) -> HitMap {
             "Enter save · Esc cancel · relative paths use startup cwd",
         );
     }
+    if let Some(picker) = &app.branch_picker {
+        draw_branch_picker(frame, picker, &app.status, app.pending_action.is_some());
+        hits.regions.clear();
+    }
     if let Some(action) = &app.pending_action {
         let title = match action.kind {
             ActionKind::ChangeDirectory => "Change directory",
@@ -263,6 +267,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> HitMap {
             ActionKind::OpenPane => "Open shell pane",
             ActionKind::ListBranches => "List branches",
             ActionKind::OpenBranchWorkspace => "Open branch workspace",
+            ActionKind::CreateBranch => "Create branch",
         };
         match &action.phase {
             ActionPhase::Input(input) => draw_form(
@@ -288,10 +293,6 @@ pub fn draw(frame: &mut Frame, app: &App) -> HitMap {
             ActionPhase::Cancelling => {}
         }
     }
-    if let Some(picker) = &app.branch_picker {
-        draw_branch_picker(frame, picker);
-        hits.regions.clear();
-    }
     if app.add_root.is_some()
         || app.pending_action.as_ref().is_some_and(|action| {
             matches!(
@@ -305,7 +306,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> HitMap {
     hits
 }
 
-fn draw_branch_picker(frame: &mut Frame, picker: &BranchPicker) {
+fn draw_branch_picker(frame: &mut Frame, picker: &BranchPicker, status: &str, busy: bool) {
     let screen = frame.area();
     let width = screen.width.saturating_sub(4).clamp(20, 100);
     let height = screen.height.saturating_sub(4).clamp(6, 24);
@@ -322,11 +323,65 @@ fn draw_branch_picker(frame: &mut Frame, picker: &BranchPicker) {
     let inner = block.inner(rect);
     frame.render_widget(Clear, rect);
     frame.render_widget(block, rect);
-    let parts = Layout::vertical([Constraint::Length(1), Constraint::Min(1)]).split(inner);
+    if picker.create_open && (screen.width < 48 || screen.height < 14) {
+        frame.render_widget(
+            Paragraph::new("Resize to at least 48x14 to create a branch\nEsc back · Ctrl+C exit")
+                .wrap(Wrap { trim: false }),
+            inner,
+        );
+        return;
+    }
+    let status = Paragraph::new(display_os(status.as_ref()))
+        .wrap(Wrap { trim: false })
+        .style(Style::default().fg(Color::Yellow));
+    let status_height = status.line_count(inner.width).min(4) as u16;
+    let parts = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(1),
+        Constraint::Length(if picker.create_open { 3 } else { 0 }),
+        Constraint::Length(2),
+        Constraint::Length(status_height),
+    ])
+    .split(inner);
     frame.render_widget(
-        Paragraph::new(format!("Filter: {}▏", display_os(picker.query.as_ref()))),
+        Paragraph::new(format!(
+            "Filter: {}{}",
+            display_os(picker.query.as_ref()),
+            if picker.create_open || busy {
+                ""
+            } else {
+                "▏"
+            },
+        )),
         parts[0],
     );
+    let help = if busy {
+        "Working… Esc cancel · Ctrl+C exit"
+    } else if picker.create_open {
+        "Tab switch result · Enter create · Esc back"
+    } else {
+        "↑↓ select · Enter open · Ctrl+N create · Esc close"
+    };
+    frame.render_widget(Paragraph::new(help).wrap(Wrap { trim: false }), parts[3]);
+    frame.render_widget(status, parts[4]);
+    if picker.create_open
+        && let Some(create) = &picker.create
+    {
+        let mode = match create.mode {
+            BranchCreateMode::Workspace => "Create & open workspace",
+            BranchCreateMode::BranchOnly => "Create branch only",
+        };
+        frame.render_widget(
+            Paragraph::new(format!(
+                "Base: {}\nName: {}{}\nResult: {mode}",
+                display_os(&create.base),
+                display_os(create.destination.as_ref()),
+                if busy { "" } else { "▏" },
+            ))
+            .style(Style::default().fg(ACCENT)),
+            parts[2],
+        );
+    }
     if picker.phase == BranchPickerPhase::Loading {
         frame.render_widget(Paragraph::new("Loading branches…  Esc cancel"), parts[1]);
         return;

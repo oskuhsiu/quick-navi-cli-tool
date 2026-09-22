@@ -1,6 +1,9 @@
 //! A single asynchronous action worker; subprocesses never write to the terminal.
 use crate::{
-    model::{ActionKind, BranchEntry, CancelToken, WorkId, display_os, display_path},
+    model::{
+        ActionKind, BranchCreate, BranchCreateMode, BranchEntry, CancelToken, WorkId, display_os,
+        display_path,
+    },
     scan::validate_directory,
 };
 use std::{
@@ -28,6 +31,12 @@ pub struct ActionEvent {
 }
 #[derive(Debug)]
 pub enum ActionOutcome {
+    BranchCreated {
+        branch: OsString,
+        message: String,
+        complete: bool,
+        workspace_uncertain: bool,
+    },
     BranchesLoaded {
         branches: Vec<BranchEntry>,
     },
@@ -56,6 +65,7 @@ struct Request {
     path: PathBuf,
     child_name: Option<String>,
     branch: Option<OsString>,
+    branch_create: Option<BranchCreate>,
     cancel: CancelToken,
     check: bool,
     deadline: Instant,
@@ -111,6 +121,7 @@ impl Actions {
             path,
             child_name: None,
             branch: None,
+            branch_create: None,
             cancel,
             check: true,
             deadline: Instant::now() + Duration::from_secs(3),
@@ -130,6 +141,7 @@ impl Actions {
             path,
             child_name,
             branch: None,
+            branch_create: None,
             cancel,
             check: false,
             deadline: Instant::now() + Duration::from_secs(30),
@@ -142,6 +154,7 @@ impl Actions {
             path,
             child_name: None,
             branch: None,
+            branch_create: None,
             cancel,
             check: true,
             deadline: Instant::now() + Duration::from_secs(3),
@@ -160,6 +173,7 @@ impl Actions {
             path,
             child_name: None,
             branch: Some(branch),
+            branch_create: None,
             cancel,
             check: true,
             deadline: Instant::now() + Duration::from_secs(3),
@@ -178,9 +192,48 @@ impl Actions {
             path,
             child_name: None,
             branch: Some(branch),
+            branch_create: None,
             cancel,
             check: false,
             deadline: Instant::now() + Duration::from_secs(30),
+        });
+    }
+    pub fn start_branch_create_check(
+        &self,
+        id: WorkId,
+        path: PathBuf,
+        create: BranchCreate,
+        cancel: CancelToken,
+    ) {
+        self.start_branch_create(id, path, create, cancel, true);
+    }
+    pub fn start_branch_create_run(
+        &self,
+        id: WorkId,
+        path: PathBuf,
+        create: BranchCreate,
+        cancel: CancelToken,
+    ) {
+        self.start_branch_create(id, path, create, cancel, false);
+    }
+    fn start_branch_create(
+        &self,
+        id: WorkId,
+        path: PathBuf,
+        create: BranchCreate,
+        cancel: CancelToken,
+        check: bool,
+    ) {
+        self.submit(Request {
+            id,
+            kind: ActionKind::CreateBranch,
+            path,
+            child_name: None,
+            branch: None,
+            branch_create: Some(create),
+            cancel,
+            check,
+            deadline: Instant::now() + Duration::from_secs(if check { 3 } else { 30 }),
         });
     }
     fn submit(&self, request: Request) {
@@ -210,6 +263,8 @@ struct Prepared {
     tool: Option<PathBuf>,
     branch: Option<OsString>,
     branch_mode: Option<BranchWorkspaceMode>,
+    branch_create: Option<BranchCreate>,
+    base_oid: Option<OsString>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BranchWorkspaceMode {
@@ -230,13 +285,17 @@ impl Worker {
         if let Err(message) = validate_directory(&request.path) {
             return ActionOutcome::InvalidTarget { message };
         }
-        if matches!(
+        if (matches!(
             request.kind,
             ActionKind::OpenHd | ActionKind::OpenPane | ActionKind::OpenBranchWorkspace
-        ) && request
-            .path
-            .to_str()
-            .is_none_or(|p| p.contains(['\r', '\n']))
+        ) || request
+            .branch_create
+            .as_ref()
+            .is_some_and(|create| create.mode == BranchCreateMode::Workspace))
+            && request
+                .path
+                .to_str()
+                .is_none_or(|p| p.contains(['\r', '\n']))
         {
             return failed("hd/Herdr require a UTF-8 path without CR or LF", false);
         }
@@ -282,6 +341,8 @@ impl Worker {
             tool: None,
             branch: None,
             branch_mode: None,
+            branch_create: request.branch_create.clone(),
+            base_oid: None,
         };
         let mut confirmation = None;
         let mut already_done = false;
@@ -291,6 +352,7 @@ impl Worker {
                 | ActionKind::OpenHd
                 | ActionKind::ListBranches
                 | ActionKind::OpenBranchWorkspace
+                | ActionKind::CreateBranch
         ) {
             let injected: Vec<_> = self
                 .environment
@@ -393,6 +455,12 @@ impl Worker {
                         Err(outcome) => outcome,
                     };
                 }
+                if request.kind == ActionKind::CreateBranch {
+                    prepared.base_oid = match self.check_branch_create(&git, request) {
+                        Ok(oid) => Some(oid),
+                        Err(outcome) => return outcome,
+                    };
+                }
                 if request.kind == ActionKind::OpenBranchWorkspace {
                     let Some(branch) = request.branch.as_ref() else {
                         return failed("A branch is required", false);
@@ -452,7 +520,10 @@ impl Worker {
                 }
                 if matches!(
                     request.kind,
-                    ActionKind::OpenHd | ActionKind::ListBranches | ActionKind::OpenBranchWorkspace
+                    ActionKind::OpenHd
+                        | ActionKind::ListBranches
+                        | ActionKind::OpenBranchWorkspace
+                        | ActionKind::CreateBranch
                 ) {
                     return failed(
                         if request.kind == ActionKind::OpenHd {
@@ -472,11 +543,36 @@ impl Worker {
             if matches!(
                 request.kind,
                 ActionKind::OpenHd | ActionKind::OpenBranchWorkspace
-            ) {
+            ) || request
+                .branch_create
+                .as_ref()
+                .is_some_and(|create| create.mode == BranchCreateMode::Workspace)
+            {
                 prepared.tool = match find_executable("hd", &self.environment) {
                     Ok(p) => Some(p),
                     Err(e) => return failed(e, false),
                 };
+                if request.kind == ActionKind::CreateBranch {
+                    let help = match self.command(
+                        prepared.tool.as_ref().unwrap(),
+                        &[OsStr::new("--help")],
+                        request,
+                        Duration::from_secs(3),
+                        false,
+                    ) {
+                        Ok(output) => output,
+                        Err(outcome) => return outcome,
+                    };
+                    if !help.status.success()
+                        || help.truncated
+                        || !String::from_utf8_lossy(&help.stdout).contains("--base")
+                    {
+                        return failed(
+                            "hd must support new --base; update hd or choose Create branch only",
+                            false,
+                        );
+                    }
+                }
             }
         } else if request.kind == ActionKind::OpenPane {
             prepared.tool = match find_executable("herdr", &self.environment) {
@@ -488,6 +584,187 @@ impl Worker {
         ActionOutcome::Checked {
             confirmation,
             already_done,
+        }
+    }
+
+    fn check_branch_create(
+        &self,
+        git: &Path,
+        request: &Request,
+    ) -> Result<OsString, ActionOutcome> {
+        let create = request
+            .branch_create
+            .as_ref()
+            .ok_or_else(|| failed("Branch creation details are required", false))?;
+        if create.destination.contains('\0') || create.base.as_bytes().contains(&0) {
+            return Err(failed("Branch name contains a NUL byte", false));
+        }
+        let destination_ref = format!("refs/heads/{}", create.destination);
+        for args in [
+            vec![OsStr::new("check-ref-format"), OsStr::new(&destination_ref)],
+            vec![
+                OsStr::new("check-ref-format"),
+                OsStr::new("--branch"),
+                OsStr::new(&create.destination),
+            ],
+        ] {
+            let output = self.command(git, &args, request, Duration::from_secs(3), false)?;
+            if !output.status.success() {
+                return Err(failed("Invalid destination branch name", false));
+            }
+        }
+        let existing = self.command(
+            git,
+            &[
+                OsStr::new("show-ref"),
+                OsStr::new("--verify"),
+                OsStr::new("--quiet"),
+                OsStr::new(&destination_ref),
+            ],
+            request,
+            Duration::from_secs(3),
+            false,
+        )?;
+        if existing.status.success() {
+            return Err(failed("Destination branch already exists", false));
+        }
+        if existing.status.code() != Some(1) {
+            return Err(failed(
+                format!(
+                    "Cannot inspect destination branch: {}",
+                    existing.diagnostic()
+                ),
+                false,
+            ));
+        }
+        let mut base_ref = OsString::from("refs/heads/");
+        base_ref.push(&create.base);
+        let valid_base = self.command(
+            git,
+            &[OsStr::new("check-ref-format"), &base_ref],
+            request,
+            Duration::from_secs(3),
+            false,
+        )?;
+        if !valid_base.status.success() {
+            return Err(failed("Invalid base branch name", false));
+        }
+        base_ref.push("^{commit}");
+        let base = self.command(
+            git,
+            &[
+                OsStr::new("rev-parse"),
+                OsStr::new("--verify"),
+                OsStr::new("--end-of-options"),
+                &base_ref,
+            ],
+            request,
+            Duration::from_secs(3),
+            false,
+        )?;
+        if !base.status.success() || base.truncated {
+            return Err(failed(
+                "Base branch no longer exists or does not point to a commit",
+                false,
+            ));
+        }
+        let oid = base.stdout.strip_suffix(b"\n").unwrap_or(&base.stdout);
+        if !matches!(oid.len(), 40 | 64) || !oid.iter().all(u8::is_ascii_hexdigit) {
+            return Err(failed("Git returned an invalid base commit", false));
+        }
+        Ok(OsString::from_vec(oid.to_vec()))
+    }
+
+    fn run_branch_create(&self, prepared: &Prepared, request: &Request) -> ActionOutcome {
+        let create = prepared
+            .branch_create
+            .as_ref()
+            .expect("creation precheck keeps request");
+        let oid = prepared
+            .base_oid
+            .as_ref()
+            .expect("creation precheck pins base");
+        let output = match self.command(
+            prepared.git.as_ref().unwrap(),
+            &[
+                OsStr::new("branch"),
+                OsStr::new("--no-track"),
+                OsStr::new("--"),
+                OsStr::new(&create.destination),
+                oid,
+            ],
+            request,
+            Duration::from_secs(10),
+            true,
+        ) {
+            Ok(output) => output,
+            Err(outcome) => return outcome,
+        };
+        if !output.status.success() {
+            return failed(
+                format!("Branch creation failed: {}", output.diagnostic()),
+                true,
+            );
+        }
+        let prefix = format!("Branch {} created", create.destination);
+        let (message, complete, workspace_uncertain) =
+            if create.mode == BranchCreateMode::BranchOnly {
+                (prefix, true, false)
+            } else {
+                match self.command(
+                    prepared.tool.as_ref().unwrap(),
+                    &[
+                        OsStr::new("new"),
+                        OsStr::new(&create.destination),
+                        OsStr::new("--base"),
+                        oid,
+                    ],
+                    request,
+                    Duration::from_secs(30),
+                    true,
+                ) {
+                    Ok(output) if output.status.success() => (
+                        format!("{prefix}; workspace opened. {}", output.diagnostic()),
+                        true,
+                        false,
+                    ),
+                    Ok(output) => (
+                        format!(
+                            "{prefix}; workspace command failed and may have taken effect. {}",
+                            output.diagnostic()
+                        ),
+                        false,
+                        true,
+                    ),
+                    Err(ActionOutcome::Cancelled { uncertain }) => (
+                        format!(
+                            "{prefix}; workspace creation cancelled{}",
+                            if uncertain {
+                                " and may have taken effect"
+                            } else {
+                                " before starting"
+                            }
+                        ),
+                        false,
+                        uncertain,
+                    ),
+                    Err(ActionOutcome::Failed { message, uncertain }) => (
+                        format!("{prefix}; workspace creation failed: {message}"),
+                        false,
+                        uncertain,
+                    ),
+                    Err(_) => (
+                        format!("{prefix}; workspace result is unknown"),
+                        false,
+                        true,
+                    ),
+                }
+            };
+        ActionOutcome::BranchCreated {
+            branch: OsString::from(&create.destination),
+            message,
+            complete,
+            workspace_uncertain,
         }
     }
 
@@ -583,9 +860,13 @@ impl Worker {
                 && p.kind == request.kind
                 && p.path == request.path
                 && p.branch == request.branch
+                && p.branch_create == request.branch_create
         }) else {
             return failed("Action has no matching completed precheck", false);
         };
+        if request.kind == ActionKind::CreateBranch {
+            return self.run_branch_create(&prepared, request);
+        }
         let (executable, args, duration): (&Path, Vec<&OsStr>, Duration) = match request.kind {
             ActionKind::GitInit => (
                 prepared.git.as_ref().unwrap(),
@@ -629,7 +910,10 @@ impl Worker {
                 ],
                 Duration::from_secs(10),
             ),
-            ActionKind::ChangeDirectory | ActionKind::ListBranches | ActionKind::Mkdir => {
+            ActionKind::ChangeDirectory
+            | ActionKind::ListBranches
+            | ActionKind::Mkdir
+            | ActionKind::CreateBranch => {
                 return failed(
                     "Change-directory results are handled by the shell boundary",
                     false,

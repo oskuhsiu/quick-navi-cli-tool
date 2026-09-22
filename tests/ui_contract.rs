@@ -321,6 +321,7 @@ fn empty_space_small_screens_and_modal_overlays_have_no_row_hits() {
             phase,
             child_name: None,
             branch: None,
+            branch_create: None,
             cancel: CancelToken::default(),
         });
         let (hits, _) = render_hits(&app, 80, 24);

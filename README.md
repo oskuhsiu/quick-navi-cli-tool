@@ -73,7 +73,10 @@ the setup.
 4. Press Enter to exit and `cd` there, or Ctrl+O to open it with your external
    `hd` while leaving qnav running. Use Ctrl+L to choose a Git branch and open
    its workspace; qnav uses `hd open` for an existing worktree and `hd new`
-   when the branch does not have one yet.
+   when the branch does not have one yet. To create a branch, select its base
+   (for example `main`), press Ctrl+N, enter the new name, and press Enter.
+   Tab switches between creating and opening a workspace (default) and creating
+   only the branch, which does not require `hd`.
 
 For search, just start typing a directory name. Results come from all your roots
 within the allowed depth, including branches you have not browsed. Use ↑/↓ to
@@ -96,10 +99,10 @@ fall back to another column's selection.
 | Esc | Clear the filter and restore browsing, or cancel an input/confirmation |
 | Enter | Exit qnav and change the calling shell's directory; requires wrapper |
 | Ctrl+O | Run external `hd` at the target; keep qnav open |
-| Ctrl+L | Choose a local Git branch and open its workspace; Esc cancels |
+| Ctrl+L | Choose a local Git branch; Enter opens its workspace, Ctrl+N creates from it |
 | Ctrl+P | Open a Herdr shell pane at the target; keep qnav open |
 | Ctrl+A | Add an existing directory as a root |
-| Ctrl+N | Create one child directory under the target |
+| Ctrl+N | Create a child directory; in the branch picker, create from the selected base |
 | Ctrl+G | Confirm and run `git init` at the target |
 | Ctrl+R | Refresh the branch displayed in the current column |
 | Ctrl+F | Reload roots from configuration and invalidate all cached listings |
@@ -107,6 +110,10 @@ fall back to another column's selection.
 
 Git initialization defaults to **Cancel**; use an arrow to select Continue,
 then Enter. Ctrl+C is the exit shortcut; double-Esc is not required.
+In the branch creation form, type the destination name, use Tab to switch the
+result mode, and Enter to create. Esc returns to the branch list and preserves
+the draft; select another base and press Ctrl+N to reuse it. During branch
+creation, Esc requests cancellation; an operation already started may have effects.
 
 The shortcut bar uses bold, high-contrast text and wraps complete key/description
 pairs in narrow panes. Font size is controlled by your terminal, not qnav.
@@ -216,8 +223,18 @@ functions. Plain browsing and Enter do not require either tool.
   branches, shows whether each already has a worktree, and runs `hd open
   <branch>` or `hd new <branch>` after you select one. Esc closes the picker
   without running an external command. Stale Git worktree metadata is shown
-  and rejected until it is cleaned up with `git worktree prune`.
-  Remote-only refs are not listed; create or check out a local branch first.
+  and blocks opening that worktree until it is cleaned up with `git worktree prune`.
+  Ctrl+N creates a new branch from the selected local branch's commit, pinned
+  when you submit the form. The base can be checked out elsewhere or have stale
+  worktree metadata. qnav does not switch the current checkout or modify its files.
+  Workspace mode requires `hd new --base` support and runs `hd` after Git creates
+  the branch. Successful creation closes the branch dialog and keeps qnav running.
+  If workspace creation fails or is cancelled, a successfully created
+  branch is preserved; a worktree may also already exist. qnav refreshes the list
+  and selects the new branch; use Enter to open or finish creating its workspace.
+  If the workspace result is uncertain, inspect it before confirming a retry.
+  Branch-only mode needs Git but not `hd`. Remote-only refs, tags, and arbitrary
+  revisions are not offered as bases.
 - **Ctrl+P:** requires Herdr and an active Herdr pane. It creates and focuses a
   right-hand shell pane with the exact target directory as its working directory.
 - **Ctrl+G:** requires Git and explicit confirmation. qnav does not create

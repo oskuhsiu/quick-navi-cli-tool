@@ -128,6 +128,20 @@ pub enum ActionKind {
     OpenPane,
     ListBranches,
     OpenBranchWorkspace,
+    CreateBranch,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchCreateMode {
+    Workspace,
+    BranchOnly,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BranchCreate {
+    pub base: OsString,
+    pub destination: String,
+    pub mode: BranchCreateMode,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -152,6 +166,9 @@ pub struct BranchPicker {
     pub branches: Vec<BranchEntry>,
     pub query: String,
     pub selected: usize,
+    pub create: Option<BranchCreate>,
+    pub create_open: bool,
+    pub select_on_load: Option<OsString>,
     pub cancel: CancelToken,
 }
 
@@ -201,6 +218,7 @@ pub struct ActionRequest {
     pub phase: ActionPhase,
     pub child_name: Option<String>,
     pub branch: Option<OsString>,
+    pub branch_create: Option<BranchCreate>,
     pub cancel: CancelToken,
 }
 #[derive(Clone, Debug, Default)]

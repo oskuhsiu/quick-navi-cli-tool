@@ -58,6 +58,10 @@ fn options() -> Result<Option<Options>, String> {
                         "Ctrl-R refresh branch  Ctrl-L reload all roots",
                         "Ctrl-R refresh branch  Ctrl-F reload roots",
                     )
+                    .replace(
+                        "Ctrl-A add root  Ctrl-N mkdir  Ctrl-G git init",
+                        "Ctrl-A add root  Ctrl-N mkdir  Ctrl-G git init\nBranch picker: Enter open  Ctrl-N create from selected base\nCreate branch: type name  Tab workspace/branch-only  Enter create  Esc back",
+                    )
                 );
                 return Ok(None);
             }
@@ -141,6 +145,7 @@ struct ActionIdentity {
     kind: ActionKind,
     target: PathBuf,
     branch: Option<OsString>,
+    branch_create: Option<BranchCreate>,
 }
 
 impl ActionIdentity {
@@ -149,6 +154,7 @@ impl ActionIdentity {
             kind: action.kind,
             target: action.target.clone(),
             branch: action.branch.clone(),
+            branch_create: action.branch_create.clone(),
         }
     }
 }
@@ -202,8 +208,15 @@ impl Runtime {
             }
             return;
         }
-        if self.app.branch_picker.is_some() {
+        if self.app.branch_picker.is_some() && self.app.pending_action.is_none() {
+            if self.app.branch_picker.as_ref().unwrap().create_open {
+                self.branch_create_key(key);
+                return;
+            }
             match key.code {
+                KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                    self.app.start_branch_create();
+                }
                 KeyCode::Esc => {
                     if self.app.cancel_branch_picker() {
                         self.app.status = "Branch picker cancelled".into();
@@ -331,10 +344,21 @@ impl Runtime {
                     return;
                 }
                 ActionPhase::Running | ActionPhase::Cancelling if key.code == KeyCode::Esc => {
+                    if a.kind == ActionKind::CreateBranch {
+                        self.app.cancel_action();
+                    }
                     return;
                 }
                 _ => {}
             }
+        }
+        if self
+            .app
+            .pending_action
+            .as_ref()
+            .is_some_and(|action| action.kind == ActionKind::CreateBranch)
+        {
+            return;
         }
         if key.modifiers.contains(KeyModifiers::CONTROL) {
             match key.code {
@@ -393,6 +417,38 @@ impl Runtime {
             _ => {}
         }
     }
+    fn branch_create_key(&mut self, key: KeyEvent) {
+        let picker = self.app.branch_picker.as_mut().unwrap();
+        let Some(create) = &mut picker.create else {
+            return;
+        };
+        match key.code {
+            KeyCode::Esc => {
+                picker.create_open = false;
+                self.app.status.clear();
+            }
+            KeyCode::Tab | KeyCode::BackTab => {
+                create.mode = match create.mode {
+                    BranchCreateMode::Workspace => BranchCreateMode::BranchOnly,
+                    BranchCreateMode::BranchOnly => BranchCreateMode::Workspace,
+                };
+            }
+            KeyCode::Backspace | KeyCode::Delete => {
+                create.destination.pop();
+            }
+            KeyCode::Enter => self.create_branch(),
+            KeyCode::Char(c)
+                if !c.is_control()
+                    && !key
+                        .modifiers
+                        .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+            {
+                create.destination.push(c);
+            }
+            _ => {}
+        }
+    }
+
     fn mouse(&mut self, mouse: MouseEvent, hits: &ui::HitMap) -> bool {
         if self.exiting
             || self.config_busy
@@ -524,6 +580,48 @@ impl Runtime {
             self.check_action();
         }
     }
+    fn create_branch(&mut self) {
+        if self.app.freeze_branch_create().is_none() {
+            return;
+        }
+        let action = self.app.pending_action.as_mut().unwrap();
+        if self
+            .uncertain
+            .contains(&ActionIdentity::from_request(action))
+        {
+            action.phase = ActionPhase::Confirm {
+                message: "Previous creation was not confirmed. Inspect the branch before retrying."
+                    .into(),
+                accepted: false,
+            };
+            self.retry_confirm = true;
+        } else {
+            self.check_action();
+        }
+    }
+
+    fn refresh_created_branch(&mut self, branch: OsString) {
+        if self.exiting {
+            return;
+        }
+        let Some(picker) = &mut self.app.branch_picker else {
+            return;
+        };
+        let Some(id) = self.app.work_ids.allocate() else {
+            return;
+        };
+        picker.cancel.cancel();
+        picker.id = id;
+        picker.cancel = CancelToken::default();
+        picker.phase = BranchPickerPhase::Loading;
+        picker.query.clear();
+        picker.create = None;
+        picker.create_open = false;
+        picker.select_on_load = Some(branch);
+        self.actions
+            .start_branch_list(id, picker.target.clone(), picker.cancel.clone());
+    }
+
     fn check_action(&mut self) {
         let a = self.app.pending_action.as_mut().unwrap();
         a.phase = ActionPhase::Checking;
@@ -532,7 +630,14 @@ impl Runtime {
             a.kind,
             display_path(&a.target)
         );
-        if a.kind == ActionKind::OpenBranchWorkspace {
+        if let Some(create) = a.branch_create.clone() {
+            self.actions.start_branch_create_check(
+                a.id,
+                a.target.clone(),
+                create,
+                a.cancel.clone(),
+            );
+        } else if a.kind == ActionKind::OpenBranchWorkspace {
             if let Some(branch) = a.branch.clone() {
                 self.actions
                     .start_branch_check(a.id, a.target.clone(), branch, a.cancel.clone());
@@ -549,7 +654,11 @@ impl Runtime {
         let a = self.app.pending_action.as_mut().unwrap();
         a.phase = ActionPhase::Running;
         self.app.status = format!("Running {:?}: {}", a.kind, display_path(&a.target));
-        if a.kind == ActionKind::OpenBranchWorkspace {
+        if let Some(create) = a.branch_create.clone() {
+            self.app.status = "Creating branch… Esc cancel".into();
+            self.actions
+                .start_branch_create_run(a.id, a.target.clone(), create, a.cancel.clone());
+        } else if a.kind == ActionKind::OpenBranchWorkspace {
             if let Some(branch) = a.branch.clone() {
                 self.actions
                     .start_branch_run(a.id, a.target.clone(), branch, a.cancel.clone());
@@ -576,8 +685,15 @@ impl Runtime {
         {
             match event.outcome {
                 ActionOutcome::BranchesLoaded { branches } => {
+                    let refreshed = self
+                        .app
+                        .branch_picker
+                        .as_ref()
+                        .is_some_and(|picker| picker.select_on_load.is_some());
                     self.app.set_branch_picker_entries(event.id, branches);
-                    self.app.status = "Select branch · ↑↓ select · Enter open · Esc cancel".into();
+                    if !refreshed {
+                        self.app.status.clear();
+                    }
                 }
                 ActionOutcome::InvalidTarget { message } => {
                     let picker = self.app.branch_picker.take().unwrap();
@@ -588,14 +704,27 @@ impl Runtime {
                     );
                 }
                 ActionOutcome::Failed { message, .. } => {
+                    let refreshed = self
+                        .app
+                        .branch_picker
+                        .as_ref()
+                        .is_some_and(|picker| picker.select_on_load.is_some());
                     self.app.branch_picker = None;
-                    self.app.status = message;
+                    if refreshed {
+                        self.app
+                            .status
+                            .push_str(&format!("; branch refresh failed: {message}"));
+                    } else {
+                        self.app.status = message;
+                    }
                 }
                 ActionOutcome::Cancelled { .. } => {
                     self.app.branch_picker = None;
                     self.app.status = "Branch picker cancelled".into();
                 }
-                ActionOutcome::Checked { .. } | ActionOutcome::Completed { .. } => {
+                ActionOutcome::Checked { .. }
+                | ActionOutcome::Completed { .. }
+                | ActionOutcome::BranchCreated { .. } => {
                     self.app.branch_picker = None;
                     self.app.status = "Branch picker received an unexpected result".into();
                 }
@@ -610,6 +739,7 @@ impl Runtime {
         }
         if matches!(a.phase, ActionPhase::Cancelling)
             && !matches!(event.outcome, ActionOutcome::Cancelled { .. })
+            && a.kind != ActionKind::CreateBranch
         {
             // A completed result queued just before cancel is itself evidence the
             // worker has reaped the child; do not apply its business result.
@@ -640,12 +770,42 @@ impl Runtime {
             return;
         }
         match event.outcome {
+            ActionOutcome::BranchCreated {
+                branch,
+                message,
+                complete,
+                workspace_uncertain,
+            } => {
+                let a = self.app.pending_action.take().unwrap();
+                self.uncertain
+                    .retain(|identity| *identity != ActionIdentity::from_request(&a));
+                if workspace_uncertain {
+                    let identity = ActionIdentity {
+                        kind: ActionKind::OpenBranchWorkspace,
+                        target: a.target,
+                        branch: Some(branch.clone()),
+                        branch_create: None,
+                    };
+                    if !self.uncertain.contains(&identity) {
+                        self.uncertain.push(identity);
+                    }
+                }
+                self.app.status = message;
+                if complete {
+                    self.app.cancel_branch_picker();
+                } else {
+                    self.refresh_created_branch(branch);
+                }
+            }
             ActionOutcome::BranchesLoaded { .. } => {
                 self.app.pending_action = None;
                 self.app.status = "Branch list arrived after the picker closed".into();
             }
             ActionOutcome::InvalidTarget { message } => {
                 let a = self.app.pending_action.take().unwrap();
+                if a.kind == ActionKind::CreateBranch {
+                    self.app.branch_picker = None;
+                }
                 self.app.mark_unavailable(&a.target, &message);
                 self.app.status = format!(
                     "Target unavailable: {} — {message}",
@@ -656,6 +816,14 @@ impl Runtime {
                 confirmation,
                 already_done,
             } => {
+                if matches!(
+                    self.app.pending_action.as_ref().unwrap().phase,
+                    ActionPhase::Cancelling
+                ) {
+                    self.app.pending_action = None;
+                    self.app.status = "Cancelled before branch creation".into();
+                    return;
+                }
                 if already_done {
                     self.app.pending_action = None;
                     self.app.status = "Already initialized at this repository root".into();

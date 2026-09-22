@@ -566,6 +566,9 @@ impl App {
             branches: Vec::new(),
             query: String::new(),
             selected: 0,
+            create: None,
+            create_open: false,
+            select_on_load: None,
             cancel: CancelToken::default(),
         });
         Some(id)
@@ -581,7 +584,68 @@ impl App {
         picker.branches = branches;
         picker.phase = BranchPickerPhase::Ready;
         picker.selected = 0;
+        if let Some(name) = picker.select_on_load.take() {
+            picker.query.clear();
+            picker.selected = picker
+                .branches
+                .iter()
+                .position(|branch| branch.name == name)
+                .unwrap_or(0);
+        }
         true
+    }
+
+    pub fn start_branch_create(&mut self) -> bool {
+        if self.pending_action.is_some() {
+            return false;
+        }
+        let Some(picker) = &mut self.branch_picker else {
+            return false;
+        };
+        if picker.phase != BranchPickerPhase::Ready {
+            return false;
+        }
+        let Some(base) = picker.selected_entry().map(|entry| entry.name.clone()) else {
+            self.status = "Select a local branch to use as the base".into();
+            return false;
+        };
+        let create = picker.create.get_or_insert(BranchCreate {
+            base: base.clone(),
+            destination: String::new(),
+            mode: BranchCreateMode::Workspace,
+        });
+        create.base = base;
+        picker.create_open = true;
+        self.status.clear();
+        true
+    }
+
+    pub fn freeze_branch_create(&mut self) -> Option<WorkId> {
+        if self.pending_action.is_some() {
+            return None;
+        }
+        let picker = self.branch_picker.as_ref()?;
+        if picker.phase != BranchPickerPhase::Ready || !picker.create_open {
+            return None;
+        }
+        let create = picker.create.clone()?;
+        if create.destination.is_empty() {
+            self.status = "Enter a new branch name".into();
+            return None;
+        }
+        let id = self.work_ids.allocate()?;
+        self.pending_action = Some(ActionRequest {
+            id,
+            kind: ActionKind::CreateBranch,
+            source: picker.source.clone(),
+            target: picker.target.clone(),
+            phase: ActionPhase::Checking,
+            child_name: None,
+            branch: None,
+            branch_create: Some(create),
+            cancel: CancelToken::default(),
+        });
+        Some(id)
     }
 
     pub fn edit_branch_picker(&mut self, query: String) -> bool {
@@ -597,8 +661,11 @@ impl App {
     }
 
     pub fn paste_branch_picker(&mut self, text: &str) -> bool {
+        if self.pending_action.is_some() {
+            return false;
+        }
         if text.chars().any(char::is_control) {
-            self.status = "Paste rejected: branch filter must be a single line".into();
+            self.status = "Paste rejected: branch name/filter must be a single line".into();
             return false;
         }
         let Some(picker) = &mut self.branch_picker else {
@@ -607,8 +674,14 @@ impl App {
         if picker.phase != BranchPickerPhase::Ready {
             return false;
         }
-        picker.query.push_str(text);
-        picker.selected = 0;
+        if picker.create_open {
+            if let Some(create) = &mut picker.create {
+                create.destination.push_str(text);
+            }
+        } else {
+            picker.query.push_str(text);
+            picker.selected = 0;
+        }
         true
     }
 
@@ -1064,6 +1137,7 @@ impl App {
             phase: ActionPhase::Checking,
             child_name: None,
             branch: None,
+            branch_create: None,
             cancel: CancelToken::default(),
         });
         Some(id)
@@ -1082,6 +1156,7 @@ impl App {
             phase: ActionPhase::Checking,
             child_name: None,
             branch: Some(selection.branch),
+            branch_create: None,
             cancel: CancelToken::default(),
         });
         Some(id)
@@ -1092,7 +1167,7 @@ impl App {
         };
         match a.phase {
             ActionPhase::Input(_) | ActionPhase::Confirm { .. } => self.pending_action = None,
-            ActionPhase::Checking => {
+            ActionPhase::Checking | ActionPhase::Running => {
                 a.cancel.cancel();
                 a.phase = ActionPhase::Cancelling;
             }
