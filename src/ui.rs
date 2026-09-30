@@ -14,6 +14,7 @@ const ACCENT: Color = Color::Cyan;
 const HELP_BACKGROUND: Color = Color::Rgb(24, 29, 36);
 const HELP_TEXT: Color = Color::Rgb(245, 247, 250);
 const HELP_KEY: Color = Color::Rgb(128, 216, 255);
+const BRANCH_SELECTED_BACKGROUND: Color = Color::Rgb(32, 44, 56);
 
 /// A selectable list in the last rendered frame.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -402,24 +403,50 @@ fn draw_branch_picker(frame: &mut Frame, picker: &BranchPicker, status: &str, bu
         .take(height)
         .map(|index| {
             let branch = &picker.branches[*index];
-            let state = if branch.stale_worktree {
-                "stale worktree metadata".into()
+            let mut spans = vec![
+                Span::styled(
+                    display_os(branch.name.as_os_str()),
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ),
+                Span::styled("  · ", Style::default().fg(Color::DarkGray)),
+            ];
+            if branch.stale_worktree {
+                spans.push(Span::styled(
+                    "stale worktree metadata",
+                    Style::default().fg(Color::Yellow),
+                ));
+            } else if let Some(path) = &branch.worktree {
+                spans.push(Span::styled("worktree", Style::default().fg(Color::Green)));
+                let path = display_path(path);
+                let (parent, component) = path
+                    .rfind('/')
+                    .map(|index| path.split_at(index + 1))
+                    .unwrap_or(("", path.as_str()));
+                spans.push(Span::styled(
+                    format!(" {parent}"),
+                    Style::default().fg(Color::Gray).add_modifier(Modifier::DIM),
+                ));
+                spans.push(Span::styled(
+                    component.to_owned(),
+                    Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+                ));
             } else {
-                branch
-                    .worktree
-                    .as_ref()
-                    .map(|path| format!("worktree {}", display_path(path)))
-                    .unwrap_or_else(|| "new worktree".into())
-            };
-            ListItem::new(format!(
-                "{}  · {state}",
-                display_os(branch.name.as_os_str())
-            ))
+                spans.push(Span::styled(
+                    "new worktree",
+                    Style::default().fg(Color::Magenta),
+                ));
+            }
+            ListItem::new(Line::from(spans))
         })
         .collect::<Vec<_>>();
     let list = List::new(rows)
+        .style(Style::default().fg(Color::Gray))
         .highlight_symbol("> ")
-        .highlight_style(Style::default().fg(ACCENT));
+        .highlight_style(
+            Style::default()
+                .bg(BRANCH_SELECTED_BACKGROUND)
+                .add_modifier(Modifier::BOLD),
+        );
     frame.render_stateful_widget(
         list,
         parts[1],

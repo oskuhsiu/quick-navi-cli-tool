@@ -84,20 +84,63 @@ fn branch_picker_overlay_shows_worktree_state_and_blocks_background_hits() {
                 worktree: None,
                 stale_worktree: false,
             },
+            BranchEntry {
+                name: "stale".into(),
+                worktree: Some("/work/missing".into()),
+                stale_worktree: true,
+            },
         ],
     );
-    let (hits, terminal) = render_hits(&app, 100, 24);
-    let text = terminal
-        .backend()
-        .buffer()
-        .content()
-        .iter()
-        .map(|cell| cell.symbol())
-        .collect::<String>();
-    assert!(text.contains("Branch workspace"));
-    assert!(text.contains("feature/demo"));
-    assert!(text.contains("new worktree"));
-    assert!((0..24).all(|y| (0..100).all(|x| hits.hit(x, y).is_none())));
+    for (width, height) in [(100, 24), (60, 20), (40, 24)] {
+        for selected in 0..3 {
+            app.branch_picker.as_mut().unwrap().selected = selected;
+            let (hits, terminal) = render_hits(&app, width, height);
+            let buffer = terminal.backend().buffer();
+            let lines: Vec<String> = (0..height)
+                .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
+                .collect();
+            assert!(lines.iter().any(|line| line.contains("Branch workspace")));
+            assert!((0..height).all(|y| (0..width).all(|x| hits.hit(x, y).is_none())));
+            for (index, (name, state, color)) in [
+                ("main", "worktree", Color::Green),
+                ("feature/demo", "new worktree", Color::Magenta),
+                ("stale", "stale worktree metadata", Color::Yellow),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let y = lines.iter().position(|line| line.contains(name)).unwrap();
+                let line = &lines[y];
+                let name_x = line[..line.find(name).unwrap()].chars().count() as u16;
+                let state_x = line[..line.find(state).unwrap()].chars().count() as u16;
+                let name_cell = &buffer[(name_x, y as u16)];
+                assert_eq!(name_cell.fg, Color::Cyan);
+                assert!(name_cell.modifier.contains(Modifier::BOLD));
+                assert_eq!(buffer[(state_x, y as u16)].fg, color);
+                assert_eq!(line.contains("> "), index == selected);
+                assert_eq!(
+                    name_cell.bg,
+                    if index == selected {
+                        Color::Rgb(32, 44, 56)
+                    } else {
+                        Color::Reset
+                    }
+                );
+                if index == 0 {
+                    let path_x = line[..line.find("/work/repo").unwrap()].chars().count() as u16;
+                    let path_cell = &buffer[(path_x, y as u16)];
+                    assert!(path_cell.modifier.contains(Modifier::DIM));
+                    let component_x = path_x + "/work/".len() as u16;
+                    for x in component_x..component_x + "repo".len() as u16 {
+                        let component_cell = &buffer[(x, y as u16)];
+                        assert_eq!(component_cell.fg, Color::Cyan);
+                        assert!(component_cell.modifier.contains(Modifier::BOLD));
+                        assert!(!component_cell.modifier.contains(Modifier::DIM));
+                    }
+                }
+            }
+        }
+    }
 }
 
 #[test]
