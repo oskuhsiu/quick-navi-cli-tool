@@ -129,6 +129,14 @@ pub enum ActionKind {
     ListBranches,
     OpenBranchWorkspace,
     CreateBranch,
+    DeleteBranch,
+    RemoveBranchWorkspace,
+}
+
+impl ActionKind {
+    pub fn is_branch_cleanup(self) -> bool {
+        matches!(self, Self::DeleteBranch | Self::RemoveBranchWorkspace)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

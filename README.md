@@ -77,6 +77,8 @@ the setup.
    (for example `main`), press Ctrl+N, enter the new name, and press Enter.
    Tab switches between creating and opening a workspace (default) and creating
    only the branch, which does not require `hd`.
+   To clean up a finished branch, use Ctrl+X to remove its workspace, then Ctrl+D
+   to delete the merged branch. Each action asks for confirmation.
 
 For search, just start typing a directory name. Results come from all your roots
 within the allowed depth, including branches you have not browsed. Use ↑/↓ to
@@ -100,6 +102,8 @@ fall back to another column's selection.
 | Enter | Exit qnav and change the calling shell's directory; requires wrapper |
 | Ctrl+O | Run external `hd` at the target; keep qnav open |
 | Ctrl+L | Choose a local Git branch; Enter opens its workspace, Ctrl+N creates from it |
+| Ctrl+D (branch picker) | Confirm deletion of the selected branch merged into this checkout's HEAD |
+| Ctrl+X (branch picker) | Confirm `hd rm <branch>` to remove its linked workspace; keeps the branch |
 | Ctrl+P | Open a Herdr shell pane at the target; keep qnav open |
 | Ctrl+A | Add an existing directory as a root |
 | Ctrl+N | Create a child directory; in the branch picker, create from the selected base |
@@ -114,6 +118,9 @@ In the branch creation form, type the destination name, use Tab to switch the
 result mode, and Enter to create. Esc returns to the branch list and preserves
 the draft; select another base and press Ctrl+N to reuse it. During branch
 creation, Esc requests cancellation; an operation already started may have effects.
+Branch and workspace deletion also default to **Cancel**. Use ←/→ or Tab to
+select Continue, then Enter. Esc cancels and keeps the branch list open. After
+cleanup, the list refreshes while retaining the filter and a surviving selection.
 
 The shortcut bar uses bold, high-contrast text and wraps complete key/description
 pairs in narrow panes. Font size is controlled by your terminal, not qnav.
@@ -235,6 +242,24 @@ functions. Plain browsing and Enter do not require either tool.
   If the workspace result is uncertain, inspect it before confirming a retry.
   Branch-only mode needs Git but not `hd`. Remote-only refs, tags, and arbitrary
   revisions are not offered as bases.
+  Ctrl+D deletes the selected local branch only if it is merged into the selected
+  directory's checkout HEAD; the confirmation shows that checkout and commit.
+  This includes detached HEAD, but requires an existing commit. Git's safe
+  `branch -d` may also refuse deletion when the configured upstream is not merged.
+  Checked-out branches must have their workspace removed first. qnav never forces
+  branch deletion or deletes remote branches.
+  Ctrl+X runs `hd rm <branch>` for a linked worktree and keeps the branch. It
+  refuses the primary checkout, the selected checkout, qnav's current working
+  directory, locked/stale/ambiguous worktrees, and worktrees with modified,
+  untracked, ignored, or submodule changes. Ignored build files must also be
+  removed or preserved elsewhere before cleanup. Entries marked assume-unchanged
+  or skip-worktree, including in submodules, block removal until their index flags
+  are restored and any hidden changes preserved. The workspace's repository,
+  branch, and path are checked again after confirmation; changed targets are
+  refused. `hd` controls Herdr workspace closure and may refuse removal if it
+  cannot inspect Herdr state. A failed or interrupted removal can have partial
+  effects; qnav reports uncertainty and refreshes the observed branch/worktree
+  state. These checks do not lock out concurrent Git or filesystem changes.
 - **Ctrl+P:** requires Herdr and an active Herdr pane. It creates and focuses a
   right-hand shell pane with the exact target directory as its working directory.
 - **Ctrl+G:** requires Git and explicit confirmation. qnav does not create

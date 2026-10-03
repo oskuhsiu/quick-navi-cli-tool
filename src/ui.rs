@@ -269,6 +269,8 @@ pub fn draw(frame: &mut Frame, app: &App) -> HitMap {
             ActionKind::ListBranches => "List branches",
             ActionKind::OpenBranchWorkspace => "Open branch workspace",
             ActionKind::CreateBranch => "Create branch",
+            ActionKind::DeleteBranch => "Delete merged branch",
+            ActionKind::RemoveBranchWorkspace => "Remove branch workspace",
         };
         match &action.phase {
             ActionPhase::Input(input) => draw_form(
@@ -336,11 +338,20 @@ fn draw_branch_picker(frame: &mut Frame, picker: &BranchPicker, status: &str, bu
         .wrap(Wrap { trim: false })
         .style(Style::default().fg(Color::Yellow));
     let status_height = status.line_count(inner.width).min(4) as u16;
+    let help = if busy {
+        "Working… Esc cancel · Ctrl+C exit"
+    } else if picker.create_open {
+        "Tab switch result · Enter create · Esc back"
+    } else {
+        "↑↓ select · Enter open · Ctrl+N create · Esc close\nCtrl+D delete merged\nCtrl+X remove workspace"
+    };
+    let help = Paragraph::new(help).wrap(Wrap { trim: false });
+    let help_height = (help.line_count(inner.width) as u16).min(inner.height.saturating_sub(2));
     let parts = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(1),
         Constraint::Length(if picker.create_open { 3 } else { 0 }),
-        Constraint::Length(2),
+        Constraint::Length(help_height),
         Constraint::Length(status_height),
     ])
     .split(inner);
@@ -356,14 +367,7 @@ fn draw_branch_picker(frame: &mut Frame, picker: &BranchPicker, status: &str, bu
         )),
         parts[0],
     );
-    let help = if busy {
-        "Working… Esc cancel · Ctrl+C exit"
-    } else if picker.create_open {
-        "Tab switch result · Enter create · Esc back"
-    } else {
-        "↑↓ select · Enter open · Ctrl+N create · Esc close"
-    };
-    frame.render_widget(Paragraph::new(help).wrap(Wrap { trim: false }), parts[3]);
+    frame.render_widget(help, parts[3]);
     frame.render_widget(status, parts[4]);
     if picker.create_open
         && let Some(create) = &picker.create

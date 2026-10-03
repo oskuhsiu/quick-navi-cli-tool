@@ -34,6 +34,8 @@ fn informational_flags_do_not_require_a_cd_result() {
                     "{shell} {flag}: {help}"
                 );
                 assert!(help.contains(wrapper.to_str().unwrap()));
+                assert!(help.contains("Ctrl-D delete branch merged into this checkout HEAD"));
+                assert!(help.contains("Ctrl-X remove workspace with hd rm; keeps branch"));
             }
         }
     }

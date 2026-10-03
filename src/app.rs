@@ -581,9 +581,10 @@ impl App {
         if picker.id != id {
             return false;
         }
+        let previous = picker.selected_entry().map(|entry| entry.name.clone());
+        let previous_index = picker.selected;
         picker.branches = branches;
         picker.phase = BranchPickerPhase::Ready;
-        picker.selected = 0;
         if let Some(name) = picker.select_on_load.take() {
             picker.query.clear();
             picker.selected = picker
@@ -591,6 +592,12 @@ impl App {
                 .iter()
                 .position(|branch| branch.name == name)
                 .unwrap_or(0);
+        } else {
+            let visible = picker.visible_indices();
+            picker.selected = visible
+                .iter()
+                .position(|index| Some(&picker.branches[*index].name) == previous.as_ref())
+                .unwrap_or_else(|| previous_index.min(visible.len().saturating_sub(1)));
         }
         true
     }
@@ -643,6 +650,33 @@ impl App {
             child_name: None,
             branch: None,
             branch_create: Some(create),
+            cancel: CancelToken::default(),
+        });
+        Some(id)
+    }
+
+    pub fn freeze_branch_cleanup(&mut self, kind: ActionKind) -> Option<WorkId> {
+        if self.pending_action.is_some() || !kind.is_branch_cleanup() {
+            return None;
+        }
+        let picker = self.branch_picker.as_ref()?;
+        if picker.phase != BranchPickerPhase::Ready || picker.create_open {
+            return None;
+        }
+        let Some(branch) = picker.selected_entry().map(|entry| entry.name.clone()) else {
+            self.status = "No matching branch selected".into();
+            return None;
+        };
+        let id = self.work_ids.allocate()?;
+        self.pending_action = Some(ActionRequest {
+            id,
+            kind,
+            source: picker.source.clone(),
+            target: picker.target.clone(),
+            phase: ActionPhase::Checking,
+            child_name: None,
+            branch: Some(branch),
+            branch_create: None,
             cancel: CancelToken::default(),
         });
         Some(id)

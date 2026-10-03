@@ -335,3 +335,76 @@ fn checking_action_freezes_path_and_cancellation_keeps_scope_locked() {
     assert!(app.scope_locked());
     assert!(app.freeze_action(ActionKind::OpenPane).is_none());
 }
+
+#[test]
+fn branch_cleanup_retains_picker_and_requires_a_ready_selection() {
+    let mut app = app(&["/work/repo"]);
+    app.move_vertical(true);
+    let id = app.start_branch_picker().unwrap();
+    assert!(
+        app.freeze_branch_cleanup(ActionKind::DeleteBranch)
+            .is_none()
+    );
+    app.set_branch_picker_entries(
+        id,
+        vec![BranchEntry {
+            name: "feature/done".into(),
+            worktree: None,
+            stale_worktree: false,
+        }],
+    );
+    app.edit_branch_picker("missing".into());
+    assert!(
+        app.freeze_branch_cleanup(ActionKind::DeleteBranch)
+            .is_none()
+    );
+    app.edit_branch_picker("done".into());
+    app.freeze_branch_cleanup(ActionKind::DeleteBranch).unwrap();
+    assert_eq!(app.branch_picker.as_ref().unwrap().query, "done");
+    let action = app.pending_action.as_ref().unwrap();
+    assert_eq!(action.branch.as_deref(), Some("feature/done".as_ref()));
+    assert_eq!(action.target, PathBuf::from("/work/repo"));
+    assert!(
+        app.freeze_branch_cleanup(ActionKind::RemoveBranchWorkspace)
+            .is_none()
+    );
+}
+
+#[test]
+fn branch_refresh_preserves_filter_and_selects_a_surviving_or_nearest_row() {
+    let mut app = app(&["/work/repo"]);
+    app.move_vertical(true);
+    let id = app.start_branch_picker().unwrap();
+    let entries = |names: &[&str]| {
+        names
+            .iter()
+            .map(|name| BranchEntry {
+                name: (*name).into(),
+                worktree: None,
+                stale_worktree: false,
+            })
+            .collect()
+    };
+    app.set_branch_picker_entries(id, entries(&["main", "topic/a", "topic/b", "topic/c"]));
+    app.edit_branch_picker("topic/".into());
+    app.move_branch_picker(true);
+    app.set_branch_picker_entries(id, entries(&["main", "topic/b", "topic/c"]));
+    let picker = app.branch_picker.as_ref().unwrap();
+    assert_eq!(picker.query, "topic/");
+    assert_eq!(picker.selected_entry().unwrap().name, "topic/b");
+    app.set_branch_picker_entries(id, entries(&["main", "topic/c"]));
+    assert_eq!(
+        app.branch_picker
+            .as_ref()
+            .unwrap()
+            .selected_entry()
+            .unwrap()
+            .name,
+        "topic/c"
+    );
+    app.set_branch_picker_entries(id, entries(&["main"]));
+    let picker = app.branch_picker.as_ref().unwrap();
+    assert_eq!(picker.query, "topic/");
+    assert!(picker.selected_entry().is_none());
+    assert_eq!(picker.selected, 0);
+}

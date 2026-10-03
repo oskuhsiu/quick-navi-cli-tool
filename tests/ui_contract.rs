@@ -100,6 +100,16 @@ fn branch_picker_overlay_shows_worktree_state_and_blocks_background_hits() {
                 .map(|y| (0..width).map(|x| buffer[(x, y)].symbol()).collect())
                 .collect();
             assert!(lines.iter().any(|line| line.contains("Branch workspace")));
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("Ctrl+D delete merged"))
+            );
+            assert!(
+                lines
+                    .iter()
+                    .any(|line| line.contains("Ctrl+X remove workspace"))
+            );
             assert!((0..height).all(|y| (0..width).all(|x| hits.hit(x, y).is_none())));
             for (index, (name, state, color)) in [
                 ("main", "worktree", Color::Green),
@@ -140,6 +150,69 @@ fn branch_picker_overlay_shows_worktree_state_and_blocks_background_hits() {
                 }
             }
         }
+    }
+}
+
+#[test]
+fn branch_cleanup_confirmations_show_target_cancel_and_keep_background_blocked() {
+    let mut app = App::new(
+        vec![RootEntry {
+            id: 1,
+            path: "/work/repo".into(),
+        }],
+        ExplorationPolicy { home: None },
+    );
+    app.move_vertical(true);
+    let id = app.start_branch_picker().unwrap();
+    app.set_branch_picker_entries(
+        id,
+        vec![BranchEntry {
+            name: "topic/done".into(),
+            worktree: Some("/work/linked".into()),
+            stale_worktree: false,
+        }],
+    );
+    for (kind, title, message) in [
+        (
+            ActionKind::DeleteBranch,
+            "Delete merged branch",
+            "Delete topic/done merged into main at abc123?",
+        ),
+        (
+            ActionKind::RemoveBranchWorkspace,
+            "Remove branch workspace",
+            "Remove /work/linked for topic/done? Branch is kept.",
+        ),
+    ] {
+        app.freeze_branch_cleanup(kind).unwrap();
+        app.pending_action.as_mut().unwrap().phase = ActionPhase::Confirm {
+            message: message.into(),
+            accepted: false,
+        };
+        for (width, height) in [(100, 24), (60, 24), (40, 24)] {
+            let (hits, terminal) = render_hits(&app, width, height);
+            let text = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|cell| cell.symbol())
+                .collect::<String>();
+            for expected in [
+                title,
+                "/work/repo",
+                "topic/done",
+                "[x] Cancel",
+                "[ ] Continue",
+            ] {
+                assert!(
+                    text.contains(expected),
+                    "{width}x{height}: {expected}\n{text}"
+                );
+            }
+            assert!((0..height).all(|y| (0..width).all(|x| hits.hit(x, y).is_none())));
+        }
+        app.cancel_action();
     }
 }
 

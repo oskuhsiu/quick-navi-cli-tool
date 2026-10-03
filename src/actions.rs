@@ -198,6 +198,47 @@ impl Actions {
             deadline: Instant::now() + Duration::from_secs(30),
         });
     }
+    pub fn start_branch_cleanup_check(
+        &self,
+        id: WorkId,
+        kind: ActionKind,
+        path: PathBuf,
+        branch: OsString,
+        cancel: CancelToken,
+    ) {
+        self.start_branch_cleanup(id, kind, path, branch, cancel, true);
+    }
+    pub fn start_branch_cleanup_run(
+        &self,
+        id: WorkId,
+        kind: ActionKind,
+        path: PathBuf,
+        branch: OsString,
+        cancel: CancelToken,
+    ) {
+        self.start_branch_cleanup(id, kind, path, branch, cancel, false);
+    }
+    fn start_branch_cleanup(
+        &self,
+        id: WorkId,
+        kind: ActionKind,
+        path: PathBuf,
+        branch: OsString,
+        cancel: CancelToken,
+        check: bool,
+    ) {
+        self.submit(Request {
+            id,
+            kind,
+            path,
+            child_name: None,
+            branch: Some(branch),
+            branch_create: None,
+            cancel,
+            check,
+            deadline: Instant::now() + Duration::from_secs(if check { 3 } else { 30 }),
+        });
+    }
     pub fn start_branch_create_check(
         &self,
         id: WorkId,
@@ -265,6 +306,7 @@ struct Prepared {
     branch_mode: Option<BranchWorkspaceMode>,
     branch_create: Option<BranchCreate>,
     base_oid: Option<OsString>,
+    cleanup: Option<CleanupSnapshot>,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BranchWorkspaceMode {
@@ -287,7 +329,10 @@ impl Worker {
         }
         if (matches!(
             request.kind,
-            ActionKind::OpenHd | ActionKind::OpenPane | ActionKind::OpenBranchWorkspace
+            ActionKind::OpenHd
+                | ActionKind::OpenPane
+                | ActionKind::OpenBranchWorkspace
+                | ActionKind::RemoveBranchWorkspace
         ) || request
             .branch_create
             .as_ref()
@@ -343,6 +388,7 @@ impl Worker {
             branch_mode: None,
             branch_create: request.branch_create.clone(),
             base_oid: None,
+            cleanup: None,
         };
         let mut confirmation = None;
         let mut already_done = false;
@@ -353,6 +399,8 @@ impl Worker {
                 | ActionKind::ListBranches
                 | ActionKind::OpenBranchWorkspace
                 | ActionKind::CreateBranch
+                | ActionKind::DeleteBranch
+                | ActionKind::RemoveBranchWorkspace
         ) {
             let injected: Vec<_> = self
                 .environment
@@ -498,6 +546,32 @@ impl Worker {
                         BranchWorkspaceMode::New
                     });
                 }
+                if request.kind.is_branch_cleanup() {
+                    let snapshot = match self.inspect_cleanup(&git, request) {
+                        Ok(snapshot) => snapshot,
+                        Err(outcome) => return outcome,
+                    };
+                    let branch = request.branch.as_ref().unwrap();
+                    confirmation = Some(if let Some(workspace) = &snapshot.workspace {
+                        format!(
+                            "Remove workspace {} for branch {} via hd? The branch will be retained.",
+                            display_path(&workspace.root.path),
+                            display_os(branch)
+                        )
+                    } else {
+                        let (oid, name) = snapshot.baseline.as_ref().unwrap();
+                        format!(
+                            "Delete local branch {} merged into {} ({})?",
+                            display_os(branch),
+                            name.as_ref()
+                                .map(|name| display_os(name))
+                                .unwrap_or_else(|| "detached HEAD".into()),
+                            display_os(oid)
+                        )
+                    });
+                    prepared.branch = Some(branch.clone());
+                    prepared.cleanup = Some(snapshot);
+                }
                 if request.kind == ActionKind::GitInit {
                     already_done = root == request.path;
                     if !already_done {
@@ -524,6 +598,8 @@ impl Worker {
                         | ActionKind::ListBranches
                         | ActionKind::OpenBranchWorkspace
                         | ActionKind::CreateBranch
+                        | ActionKind::DeleteBranch
+                        | ActionKind::RemoveBranchWorkspace
                 ) {
                     return failed(
                         if request.kind == ActionKind::OpenHd {
@@ -542,7 +618,9 @@ impl Worker {
             prepared.git = Some(git);
             if matches!(
                 request.kind,
-                ActionKind::OpenHd | ActionKind::OpenBranchWorkspace
+                ActionKind::OpenHd
+                    | ActionKind::OpenBranchWorkspace
+                    | ActionKind::RemoveBranchWorkspace
             ) || request
                 .branch_create
                 .as_ref()
@@ -550,6 +628,12 @@ impl Worker {
             {
                 prepared.tool = match find_executable("hd", &self.environment) {
                     Ok(p) => Some(p),
+                    Err(e) if request.kind == ActionKind::RemoveBranchWorkspace => {
+                        return failed(
+                            format!("{e}; install hd or add it to PATH to remove workspaces"),
+                            false,
+                        );
+                    }
                     Err(e) => return failed(e, false),
                 };
                 if request.kind == ActionKind::CreateBranch {
@@ -584,6 +668,481 @@ impl Worker {
         ActionOutcome::Checked {
             confirmation,
             already_done,
+        }
+    }
+
+    fn cleanup_output(
+        &self,
+        git: &Path,
+        cwd: &Path,
+        args: &[&OsStr],
+        request: &Request,
+    ) -> Result<Output, ActionOutcome> {
+        let duration = if request.check {
+            Duration::from_secs(3).min(request.deadline.saturating_duration_since(Instant::now()))
+        } else {
+            Duration::from_secs(3)
+        };
+        run_process(
+            git,
+            args,
+            ProcessContext {
+                cwd,
+                environment: &self.environment,
+                cancel: &request.cancel,
+                shutdown: &self.shutdown,
+            },
+            duration,
+            false,
+        )
+    }
+    fn cleanup_value(
+        &self,
+        git: &Path,
+        cwd: &Path,
+        args: &[&OsStr],
+        request: &Request,
+    ) -> Result<OsString, ActionOutcome> {
+        let output = self.cleanup_output(git, cwd, args, request)?;
+        if !output.status.success() || output.truncated {
+            return Err(failed(
+                format!("Cannot inspect cleanup target: {}", output.diagnostic()),
+                false,
+            ));
+        }
+        let bytes = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+        if bytes.is_empty() || bytes.contains(&0) {
+            return Err(failed("Git returned an invalid cleanup identity", false));
+        }
+        Ok(OsString::from_vec(bytes.to_vec()))
+    }
+    fn repository_identity(
+        &self,
+        git: &Path,
+        cwd: &Path,
+        request: &Request,
+    ) -> Result<RepositoryIdentity, ActionOutcome> {
+        let mut paths = Vec::new();
+        for option in ["--show-toplevel", "--git-common-dir", "--git-dir"] {
+            let path = self.cleanup_value(
+                git,
+                cwd,
+                &[
+                    OsStr::new("rev-parse"),
+                    OsStr::new("--path-format=absolute"),
+                    OsStr::new(option),
+                ],
+                request,
+            )?;
+            let path = PathBuf::from(path);
+            if !path.is_absolute() {
+                return Err(failed("Git returned a relative cleanup identity", false));
+            }
+            paths.push(DirectoryIdentity::inspect(&path)?);
+        }
+        let mut paths = paths.into_iter();
+        Ok(RepositoryIdentity {
+            root: paths.next().unwrap(),
+            common: paths.next().unwrap(),
+            gitdir: paths.next().unwrap(),
+        })
+    }
+    fn symbolic_ref(
+        &self,
+        git: &Path,
+        cwd: &Path,
+        name: &OsStr,
+        request: &Request,
+    ) -> Result<Option<OsString>, ActionOutcome> {
+        let output = self.cleanup_output(
+            git,
+            cwd,
+            &[OsStr::new("symbolic-ref"), OsStr::new("--quiet"), name],
+            request,
+        )?;
+        if output.status.success() && !output.truncated {
+            Ok(Some(OsString::from_vec(
+                output
+                    .stdout
+                    .strip_suffix(b"\n")
+                    .unwrap_or(&output.stdout)
+                    .to_vec(),
+            )))
+        } else if output.status.code() == Some(1) && !output.truncated {
+            Ok(None)
+        } else {
+            Err(failed("Cannot inspect symbolic cleanup ref", false))
+        }
+    }
+    fn cleanup_worktrees(
+        &self,
+        git: &Path,
+        request: &Request,
+    ) -> Result<Vec<WorktreeInfo>, ActionOutcome> {
+        let output = self.cleanup_output(
+            git,
+            &request.path,
+            &[
+                OsStr::new("worktree"),
+                OsStr::new("list"),
+                OsStr::new("--porcelain"),
+                OsStr::new("-z"),
+            ],
+            request,
+        )?;
+        if !output.status.success() || output.truncated {
+            return Err(failed("Cannot inspect cleanup worktrees", false));
+        }
+        let records = worktree_records(&output.stdout);
+        if records.is_empty() {
+            return Err(failed("Git returned no worktree records", false));
+        }
+        Ok(records)
+    }
+    fn inspect_cleanup(
+        &self,
+        git: &Path,
+        request: &Request,
+    ) -> Result<CleanupSnapshot, ActionOutcome> {
+        let branch = request
+            .branch
+            .as_ref()
+            .ok_or_else(|| failed("A branch is required", false))?;
+        if branch.as_bytes().contains(&0) {
+            return Err(failed("Branch name contains a NUL byte", false));
+        }
+        let mut full_ref = OsString::from("refs/heads/");
+        full_ref.push(branch);
+        let valid = self.cleanup_output(
+            git,
+            &request.path,
+            &[OsStr::new("check-ref-format"), &full_ref],
+            request,
+        )?;
+        if !valid.status.success() {
+            return Err(failed("Invalid local branch name", false));
+        }
+        // Both commands accept a short branch argument; never let it become an option.
+        let valid_short = self.cleanup_output(
+            git,
+            &request.path,
+            &[
+                OsStr::new("check-ref-format"),
+                OsStr::new("--branch"),
+                branch,
+            ],
+            request,
+        )?;
+        if !valid_short.status.success() {
+            return Err(failed("Invalid local branch name", false));
+        }
+        if self
+            .symbolic_ref(git, &request.path, &full_ref, request)?
+            .is_some()
+        {
+            return Err(failed(
+                "Symbolic local branches cannot be cleaned up",
+                false,
+            ));
+        }
+        let oid = self.cleanup_value(
+            git,
+            &request.path,
+            &[
+                OsStr::new("show-ref"),
+                OsStr::new("--verify"),
+                OsStr::new("--hash"),
+                &full_ref,
+            ],
+            request,
+        )?;
+        if !matches!(oid.as_bytes().len(), 40 | 64)
+            || !oid.as_bytes().iter().all(u8::is_ascii_hexdigit)
+        {
+            return Err(failed("Git returned an invalid branch commit", false));
+        }
+        let repository = self.repository_identity(git, &request.path, request)?;
+        let worktrees = self.cleanup_worktrees(git, request)?;
+        let matching: Vec<_> = worktrees
+            .iter()
+            .enumerate()
+            .filter(|(_, info)| info.branch.as_ref() == Some(branch))
+            .collect();
+        let (baseline, workspace) = if request.kind == ActionKind::DeleteBranch {
+            if !matching.is_empty() {
+                return Err(failed(
+                    "Branch is checked out or has stale worktree metadata; remove its workspace first",
+                    false,
+                ));
+            }
+            let head = self.cleanup_value(
+                git,
+                &request.path,
+                &[
+                    OsStr::new("rev-parse"),
+                    OsStr::new("--verify"),
+                    OsStr::new("HEAD^{commit}"),
+                ],
+                request,
+            )?;
+            let name = self.symbolic_ref(git, &request.path, OsStr::new("HEAD"), request)?;
+            let merged = self.cleanup_output(
+                git,
+                &request.path,
+                &[
+                    OsStr::new("merge-base"),
+                    OsStr::new("--is-ancestor"),
+                    &oid,
+                    &head,
+                ],
+                request,
+            )?;
+            if !merged.status.success() {
+                return Err(failed(
+                    "Branch is not merged into the selected checkout HEAD",
+                    false,
+                ));
+            }
+            (Some((head, name)), None)
+        } else if request.kind == ActionKind::RemoveBranchWorkspace {
+            if matching.len() != 1 {
+                return Err(failed(
+                    "Branch must have exactly one registered workspace (missing or ambiguous)",
+                    false,
+                ));
+            }
+            let (index, info) = matching[0];
+            if index == 0 {
+                return Err(failed("Cannot remove the primary worktree", false));
+            }
+            if info.stale || info.locked {
+                return Err(failed(
+                    "Workspace is stale, missing, or locked; inspect git worktree list",
+                    false,
+                ));
+            }
+            let workspace = self.repository_identity(git, &info.path, request)?;
+            if workspace.root.path
+                != fs::canonicalize(&info.path).map_err(|e| failed(e.to_string(), false))?
+                || workspace.common != repository.common
+            {
+                return Err(failed(
+                    "Workspace repository identity does not match the selected repository",
+                    false,
+                ));
+            }
+            if workspace.root.path == repository.root.path {
+                return Err(failed("Cannot remove the selected target checkout", false));
+            }
+            let cwd = std::env::current_dir()
+                .and_then(fs::canonicalize)
+                .map_err(|e| {
+                    failed(format!("Cannot inspect qnav current directory: {e}"), false)
+                })?;
+            if cwd.starts_with(&workspace.root.path) {
+                return Err(failed(
+                    "Cannot remove a workspace containing qnav's current directory",
+                    false,
+                ));
+            }
+            if workspace
+                .root
+                .path
+                .to_str()
+                .is_none_or(|path| path.contains(['\r', '\n']))
+            {
+                return Err(failed(
+                    "hd/Herdr require a UTF-8 workspace path without CR or LF",
+                    false,
+                ));
+            }
+            if self
+                .symbolic_ref(git, &info.path, OsStr::new("HEAD"), request)?
+                .as_ref()
+                != Some(&full_ref)
+            {
+                return Err(failed(
+                    "Workspace HEAD no longer matches the selected branch",
+                    false,
+                ));
+            }
+            // Status can hide modified tracked files when these index flags are set.
+            // Recurse into initialized submodules so their tracked contents are protected too.
+            let index = self.cleanup_output(
+                git,
+                &info.path,
+                &[
+                    OsStr::new("ls-files"),
+                    OsStr::new("--cached"),
+                    OsStr::new("-v"),
+                    OsStr::new("-z"),
+                    OsStr::new("--recurse-submodules"),
+                ],
+                request,
+            )?;
+            if !index.status.success()
+                || index.truncated
+                || (!index.stdout.is_empty() && !index.stdout.ends_with(&[0]))
+            {
+                return Err(failed(
+                    "Cannot inspect workspace index flags; preserve changes before removal",
+                    false,
+                ));
+            }
+            for record in index
+                .stdout
+                .split(|byte| *byte == 0)
+                .filter(|record| !record.is_empty())
+            {
+                if record.len() < 3 || record[1] != b' ' {
+                    return Err(failed(
+                        "Cannot inspect workspace index flags; preserve changes before removal",
+                        false,
+                    ));
+                }
+                if record[0].is_ascii_lowercase() || record[0] == b'S' {
+                    return Err(failed(
+                        "Workspace has assume-unchanged or skip-worktree index flags; restore these flags and preserve changes before removal",
+                        false,
+                    ));
+                }
+            }
+            let status = self.cleanup_output(
+                git,
+                &info.path,
+                &[
+                    OsStr::new("status"),
+                    OsStr::new("--porcelain"),
+                    OsStr::new("-z"),
+                    OsStr::new("--untracked-files=all"),
+                    OsStr::new("--ignored"),
+                    OsStr::new("--ignore-submodules=none"),
+                ],
+                request,
+            )?;
+            if !status.status.success() || status.truncated || !status.stdout.is_empty() {
+                return Err(failed(
+                    "Workspace has tracked, untracked, ignored, or submodule changes; preserve them before removal",
+                    false,
+                ));
+            }
+            (None, Some(workspace))
+        } else {
+            return Err(failed("Invalid branch cleanup action", false));
+        };
+        Ok(CleanupSnapshot {
+            repository,
+            full_ref,
+            oid,
+            baseline,
+            workspace,
+        })
+    }
+    fn run_branch_cleanup(&self, prepared: &Prepared, request: &Request) -> ActionOutcome {
+        let git = prepared.git.as_ref().unwrap();
+        let expected = prepared.cleanup.as_ref().unwrap();
+        match self.inspect_cleanup(git, request) {
+            Ok(current) if current == *expected => {}
+            Ok(_) => {
+                return failed(
+                    "Cleanup target changed since confirmation; reopen the branch picker",
+                    false,
+                );
+            }
+            Err(outcome) => return outcome,
+        }
+        let branch = request.branch.as_ref().unwrap();
+        let (executable, args) = if request.kind == ActionKind::DeleteBranch {
+            (
+                git,
+                vec![
+                    OsStr::new("branch"),
+                    OsStr::new("-d"),
+                    OsStr::new("--"),
+                    branch.as_os_str(),
+                ],
+            )
+        } else {
+            (
+                prepared.tool.as_ref().unwrap(),
+                vec![OsStr::new("rm"), branch.as_os_str()],
+            )
+        };
+        let output = match self.command(executable, &args, request, Duration::from_secs(30), true) {
+            Ok(output) => output,
+            Err(outcome) => return outcome,
+        };
+        if !output.status.success() {
+            return failed(
+                format!(
+                    "Cleanup failed and may have taken effect: {}",
+                    output.diagnostic()
+                ),
+                true,
+            );
+        }
+        if let Some(workspace) = &expected.workspace {
+            let records = match self.cleanup_worktrees(git, request) {
+                Ok(records) => records,
+                Err(ActionOutcome::Cancelled { .. }) => {
+                    return ActionOutcome::Cancelled { uncertain: true };
+                }
+                Err(_) => {
+                    return failed(
+                        "Workspace command succeeded but removal could not be verified",
+                        true,
+                    );
+                }
+            };
+            let path_absent = matches!(fs::symlink_metadata(&workspace.root.path),
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound);
+            if !path_absent
+                || records.iter().any(|info| {
+                    info.branch.as_ref() == Some(branch)
+                        || fs::canonicalize(&info.path).unwrap_or_else(|_| info.path.clone())
+                            == workspace.root.path
+                })
+            {
+                return failed(
+                    "Workspace command succeeded but the workspace still exists or remains registered",
+                    true,
+                );
+            }
+            let retained = self.cleanup_value(
+                git,
+                &request.path,
+                &[
+                    OsStr::new("show-ref"),
+                    OsStr::new("--verify"),
+                    OsStr::new("--hash"),
+                    &expected.full_ref,
+                ],
+                request,
+            );
+            match retained {
+                Ok(oid) if oid == expected.oid => {}
+                Err(ActionOutcome::Cancelled { .. }) => {
+                    return ActionOutcome::Cancelled { uncertain: true };
+                }
+                _ => {
+                    return failed(
+                        "Workspace was removed but branch retention could not be verified",
+                        true,
+                    );
+                }
+            }
+        }
+        ActionOutcome::Completed {
+            message: format!(
+                "{} {}",
+                if request.kind == ActionKind::DeleteBranch {
+                    "Deleted branch"
+                } else {
+                    "Removed workspace for branch"
+                },
+                display_os(branch)
+            ),
+            created: None,
         }
     }
 
@@ -864,6 +1423,9 @@ impl Worker {
         }) else {
             return failed("Action has no matching completed precheck", false);
         };
+        if request.kind.is_branch_cleanup() {
+            return self.run_branch_cleanup(&prepared, request);
+        }
         if request.kind == ActionKind::CreateBranch {
             return self.run_branch_create(&prepared, request);
         }
@@ -913,7 +1475,9 @@ impl Worker {
             ActionKind::ChangeDirectory
             | ActionKind::ListBranches
             | ActionKind::Mkdir
-            | ActionKind::CreateBranch => {
+            | ActionKind::CreateBranch
+            | ActionKind::DeleteBranch
+            | ActionKind::RemoveBranchWorkspace => {
                 return failed(
                     "Change-directory results are handled by the shell boundary",
                     false,
@@ -943,44 +1507,93 @@ fn failed(message: impl Into<String>, uncertain: bool) -> ActionOutcome {
     }
 }
 
+#[derive(Debug, PartialEq, Eq)]
+struct DirectoryIdentity {
+    path: PathBuf,
+    device: u64,
+    inode: u64,
+}
+impl DirectoryIdentity {
+    fn inspect(path: &Path) -> Result<Self, ActionOutcome> {
+        let path = fs::canonicalize(path)
+            .map_err(|e| failed(format!("Cannot resolve cleanup directory: {e}"), false))?;
+        let metadata = fs::metadata(&path)
+            .map_err(|e| failed(format!("Cannot inspect cleanup directory: {e}"), false))?;
+        if !metadata.is_dir() {
+            return Err(failed("Cleanup target is not a directory", false));
+        }
+        Ok(Self {
+            path,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+        })
+    }
+}
+#[derive(Debug, PartialEq, Eq)]
+struct RepositoryIdentity {
+    root: DirectoryIdentity,
+    common: DirectoryIdentity,
+    gitdir: DirectoryIdentity,
+}
+#[derive(Debug, PartialEq, Eq)]
+struct CleanupSnapshot {
+    repository: RepositoryIdentity,
+    full_ref: OsString,
+    oid: OsString,
+    baseline: Option<(OsString, Option<OsString>)>,
+    workspace: Option<RepositoryIdentity>,
+}
 struct WorktreeInfo {
     path: PathBuf,
+    branch: Option<OsString>,
     stale: bool,
+    locked: bool,
 }
 
-fn parse_worktrees(output: &[u8]) -> BTreeMap<OsString, WorktreeInfo> {
-    let mut locations = BTreeMap::new();
-    let mut worktree = None;
-    let mut branch = None;
-    let mut stale = false;
-    let mut finish =
-        |worktree: &mut Option<PathBuf>, branch: &mut Option<OsString>, stale: &mut bool| {
-            if let (Some(path), Some(name)) = (worktree.take(), branch.take()) {
-                locations.insert(
-                    name,
-                    WorktreeInfo {
-                        stale: *stale || !path.is_dir(),
-                        path,
-                    },
-                );
-            } else {
-                worktree.take();
-                branch.take();
-            }
-            *stale = false;
-        };
+fn worktree_records(output: &[u8]) -> Vec<WorktreeInfo> {
+    let mut records = Vec::new();
+    let mut current: Option<WorktreeInfo> = None;
     for field in output.split(|byte| *byte == 0) {
         if field.is_empty() {
-            finish(&mut worktree, &mut branch, &mut stale);
+            if let Some(mut info) = current.take() {
+                info.stale |= !info.path.is_dir();
+                records.push(info);
+            }
         } else if let Some(path) = field.strip_prefix(b"worktree ") {
-            worktree = Some(PathBuf::from(OsString::from_vec(path.to_vec())));
-        } else if let Some(name) = field.strip_prefix(b"branch refs/heads/") {
-            branch = Some(OsString::from_vec(name.to_vec()));
-        } else if field.starts_with(b"prunable") {
-            stale = true;
+            current = Some(WorktreeInfo {
+                path: PathBuf::from(OsString::from_vec(path.to_vec())),
+                branch: None,
+                stale: false,
+                locked: false,
+            });
+        } else if let Some(info) = current.as_mut() {
+            if let Some(name) = field.strip_prefix(b"branch refs/heads/") {
+                info.branch = Some(OsString::from_vec(name.to_vec()));
+            } else if field.starts_with(b"prunable") {
+                info.stale = true;
+            } else if field == b"locked" || field.starts_with(b"locked ") {
+                info.locked = true;
+            }
         }
     }
-    finish(&mut worktree, &mut branch, &mut stale);
+    if let Some(mut info) = current {
+        info.stale |= !info.path.is_dir();
+        records.push(info);
+    }
+    records
+}
+fn parse_worktrees(output: &[u8]) -> BTreeMap<OsString, WorktreeInfo> {
+    let mut locations = BTreeMap::new();
+    for info in worktree_records(output) {
+        if let Some(branch) = info.branch.clone() {
+            locations
+                .entry(branch)
+                .and_modify(|existing: &mut WorktreeInfo| {
+                    existing.stale = true;
+                })
+                .or_insert(info);
+        }
+    }
     locations
 }
 
