@@ -371,6 +371,7 @@ impl Worker {
                 environment: &self.environment,
                 cancel: &request.cancel,
                 shutdown: &self.shutdown,
+                stdout_consumer: None,
             },
             duration,
             side_effect,
@@ -678,6 +679,16 @@ impl Worker {
         args: &[&OsStr],
         request: &Request,
     ) -> Result<Output, ActionOutcome> {
+        self.cleanup_output_with_stdout(git, cwd, args, request, None)
+    }
+    fn cleanup_output_with_stdout(
+        &self,
+        git: &Path,
+        cwd: &Path,
+        args: &[&OsStr],
+        request: &Request,
+        stdout_consumer: Option<OutputConsumer<'_>>,
+    ) -> Result<Output, ActionOutcome> {
         let duration = if request.check {
             Duration::from_secs(3).min(request.deadline.saturating_duration_since(Instant::now()))
         } else {
@@ -691,6 +702,7 @@ impl Worker {
                 environment: &self.environment,
                 cancel: &request.cancel,
                 shutdown: &self.shutdown,
+                stdout_consumer,
             },
             duration,
             false,
@@ -968,7 +980,9 @@ impl Worker {
             }
             // Status can hide modified tracked files when these index flags are set.
             // Recurse into initialized submodules so their tracked contents are protected too.
-            let index = self.cleanup_output(
+            // Stream the records: a clean repository's file list can exceed the capture limit.
+            let mut flags = IndexFlags::default();
+            let index = self.cleanup_output_with_stdout(
                 git,
                 &info.path,
                 &[
@@ -979,33 +993,23 @@ impl Worker {
                     OsStr::new("--recurse-submodules"),
                 ],
                 request,
+                Some(&mut |bytes| flags.consume(bytes)),
             )?;
             if !index.status.success()
                 || index.truncated
-                || (!index.stdout.is_empty() && !index.stdout.ends_with(&[0]))
+                || !index.stdout_complete
+                || !flags.complete()
             {
                 return Err(failed(
                     "Cannot inspect workspace index flags; preserve changes before removal",
                     false,
                 ));
             }
-            for record in index
-                .stdout
-                .split(|byte| *byte == 0)
-                .filter(|record| !record.is_empty())
-            {
-                if record.len() < 3 || record[1] != b' ' {
-                    return Err(failed(
-                        "Cannot inspect workspace index flags; preserve changes before removal",
-                        false,
-                    ));
-                }
-                if record[0].is_ascii_lowercase() || record[0] == b'S' {
-                    return Err(failed(
-                        "Workspace has assume-unchanged or skip-worktree index flags; restore these flags and preserve changes before removal",
-                        false,
-                    ));
-                }
+            if flags.hidden {
+                return Err(failed(
+                    "Workspace has assume-unchanged or skip-worktree index flags; restore these flags and preserve changes before removal",
+                    false,
+                ));
             }
             let status = self.cleanup_output(
                 git,
@@ -1613,11 +1617,40 @@ fn find_executable(
     Err(format!("No external {name} executable on PATH"))
 }
 
+#[derive(Default)]
+struct IndexFlags {
+    record_length: u8,
+    malformed: bool,
+    hidden: bool,
+}
+impl IndexFlags {
+    fn consume(&mut self, bytes: &[u8]) {
+        for &byte in bytes {
+            if byte == 0 {
+                self.malformed |= matches!(self.record_length, 1 | 2);
+                self.record_length = 0;
+                continue;
+            }
+            match self.record_length {
+                0 => self.hidden |= byte.is_ascii_lowercase() || byte == b'S',
+                1 => self.malformed |= byte != b' ',
+                _ => {}
+            }
+            // Only the tag, separator, and presence of a path byte matter.
+            self.record_length = (self.record_length + 1).min(3);
+        }
+    }
+    fn complete(&self) -> bool {
+        !self.malformed && self.record_length == 0
+    }
+}
+
 struct Output {
     status: ExitStatus,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     truncated: bool,
+    stdout_complete: bool,
 }
 impl Output {
     fn diagnostic(&self) -> String {
@@ -1630,16 +1663,20 @@ impl Output {
         text
     }
 }
-struct ProcessContext<'a> {
+type OutputConsumer<'a> = &'a mut dyn FnMut(&[u8]);
+
+struct ProcessContext<'a, 'stdout> {
     cwd: &'a Path,
     environment: &'a BTreeMap<OsString, OsString>,
     cancel: &'a CancelToken,
     shutdown: &'a CancelToken,
+    // A consumer receives the entire stream instead of retaining bounded diagnostic output.
+    stdout_consumer: Option<OutputConsumer<'stdout>>,
 }
 fn run_process(
     executable: &Path,
     args: &[&OsStr],
-    context: ProcessContext<'_>,
+    context: ProcessContext<'_, '_>,
     duration: Duration,
     side_effect: bool,
 ) -> Result<Output, ActionOutcome> {
@@ -1648,6 +1685,7 @@ fn run_process(
         environment,
         cancel,
         shutdown,
+        stdout_consumer,
     } = context;
     if cancel.is_cancelled() || shutdown.is_cancelled() {
         return Err(ActionOutcome::Cancelled { uncertain: false });
@@ -1688,17 +1726,17 @@ fn run_process(
         }
     }
     let deadline = Instant::now() + duration;
-    let mut out = Vec::new();
-    let mut err = Vec::new();
+    let mut out = OutputBuffer::new(stdout_consumer);
+    let mut err = OutputBuffer::new(None);
     let mut truncated = false;
     loop {
-        drain(&mut stdout, &mut out, err.len(), &mut truncated);
-        drain(&mut stderr, &mut err, out.len(), &mut truncated);
+        drain(&mut stdout, &mut out, err.bytes.len(), &mut truncated);
+        drain(&mut stderr, &mut err, out.bytes.len(), &mut truncated);
         let cancelled = cancel.is_cancelled() || shutdown.is_cancelled();
         if cancelled || Instant::now() >= deadline {
             terminate_group(group, &mut child, || {
-                drain(&mut stdout, &mut out, err.len(), &mut truncated);
-                drain(&mut stderr, &mut err, out.len(), &mut truncated);
+                drain(&mut stdout, &mut out, err.bytes.len(), &mut truncated);
+                drain(&mut stderr, &mut err, out.bytes.len(), &mut truncated);
             });
             return Err(if cancelled {
                 ActionOutcome::Cancelled {
@@ -1710,18 +1748,18 @@ fn run_process(
         }
         match child.try_wait() {
             Ok(Some(status)) => {
-                let out_eof = drain(&mut stdout, &mut out, err.len(), &mut truncated);
-                let err_eof = drain(&mut stderr, &mut err, out.len(), &mut truncated);
+                let out_eof = drain(&mut stdout, &mut out, err.bytes.len(), &mut truncated);
+                let err_eof = drain(&mut stderr, &mut err, out.bytes.len(), &mut truncated);
                 if !(out_eof && err_eof) {
                     // A child may have exited while descendants retain its pipe ends.
                     // Reap the leader and bound cleanup of its own process group.
                     terminate_group(group, &mut child, || {
-                        drain(&mut stdout, &mut out, err.len(), &mut truncated);
-                        drain(&mut stderr, &mut err, out.len(), &mut truncated);
+                        drain(&mut stdout, &mut out, err.bytes.len(), &mut truncated);
+                        drain(&mut stderr, &mut err, out.bytes.len(), &mut truncated);
                     });
                 }
-                drain(&mut stdout, &mut out, err.len(), &mut truncated);
-                drain(&mut stderr, &mut err, out.len(), &mut truncated);
+                drain(&mut stdout, &mut out, err.bytes.len(), &mut truncated);
+                drain(&mut stderr, &mut err, out.bytes.len(), &mut truncated);
                 if cancel.is_cancelled() || shutdown.is_cancelled() {
                     return Err(ActionOutcome::Cancelled {
                         uncertain: side_effect,
@@ -1729,8 +1767,9 @@ fn run_process(
                 }
                 return Ok(Output {
                     status,
-                    stdout: out,
-                    stderr: err,
+                    stdout_complete: out.eof && !out.read_failed,
+                    stdout: out.bytes,
+                    stderr: err.bytes,
                     truncated,
                 });
             }
@@ -1762,9 +1801,25 @@ fn terminate_group(group: i32, child: &mut std::process::Child, mut drain_output
     }
     let _ = child.wait();
 }
+struct OutputBuffer<'a> {
+    bytes: Vec<u8>,
+    consumer: Option<OutputConsumer<'a>>,
+    eof: bool,
+    read_failed: bool,
+}
+impl<'a> OutputBuffer<'a> {
+    fn new(consumer: Option<OutputConsumer<'a>>) -> Self {
+        Self {
+            bytes: Vec::new(),
+            consumer,
+            eof: false,
+            read_failed: false,
+        }
+    }
+}
 fn drain(
     reader: &mut impl Read,
-    buffer: &mut Vec<u8>,
+    buffer: &mut OutputBuffer<'_>,
     other_length: usize,
     truncated: &mut bool,
 ) -> bool {
@@ -1772,14 +1827,24 @@ fn drain(
     // Bound each poll even when a child produces output faster than it can be read.
     for _ in 0..8 {
         match reader.read(&mut chunk) {
-            Ok(0) => return true,
+            Ok(0) => {
+                buffer.eof = true;
+                return true;
+            }
             Ok(n) => {
-                let keep = n.min(65536usize.saturating_sub(buffer.len() + other_length));
-                buffer.extend_from_slice(&chunk[..keep]);
-                *truncated |= keep < n;
+                if let Some(consume) = &mut buffer.consumer {
+                    consume(&chunk[..n]);
+                } else {
+                    let keep = n.min(65536usize.saturating_sub(buffer.bytes.len() + other_length));
+                    buffer.bytes.extend_from_slice(&chunk[..keep]);
+                    *truncated |= keep < n;
+                }
             }
             Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-            Err(_) => break,
+            Err(e) => {
+                buffer.read_failed |= e.kind() != std::io::ErrorKind::WouldBlock;
+                break;
+            }
         }
     }
     false

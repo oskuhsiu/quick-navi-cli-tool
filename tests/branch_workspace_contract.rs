@@ -1023,6 +1023,143 @@ fn workspace_remove_rechecks_branch_oid_with_a_clean_unchanged_workspace_tree() 
     assert!(!fixture.record.exists());
 }
 
+fn large_clean_index_fixture() -> Fixture {
+    let fixture = Fixture::new();
+    for index in 0..800 {
+        fs::write(
+            fixture
+                .linked
+                .join(format!("tracked-{index:04}-{}", "x".repeat(80))),
+            "fixture\n",
+        )
+        .unwrap();
+    }
+    run_git(&["-C", fixture.linked.to_str().unwrap(), "add", "."], &[]);
+    run_git(
+        &[
+            "-C",
+            fixture.linked.to_str().unwrap(),
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.com",
+            "commit",
+            "-qm",
+            "large clean index",
+        ],
+        &[],
+    );
+    let index = Command::new("git")
+        .arg("-C")
+        .arg(&fixture.linked)
+        .args(["ls-files", "--cached", "-v", "-z", "--recurse-submodules"])
+        .output()
+        .unwrap();
+    assert!(index.status.success());
+    assert!(index.stdout.len() > 65536);
+    fixture
+}
+
+#[test]
+fn workspace_remove_accepts_a_clean_index_larger_than_the_output_capture_limit() {
+    let mut fixture = large_clean_index_fixture();
+    fixture
+        .environment
+        .insert("WORKSPACE".into(), fixture.linked.as_os_str().into());
+    remove_workspace_hd(&fixture);
+    let actions = Actions::with_environment(fixture.environment.clone());
+    assert_checked(cleanup_check(
+        &actions,
+        &fixture,
+        ActionKind::RemoveBranchWorkspace,
+        "existing",
+    ));
+    assert!(matches!(
+        cleanup_run(
+            &actions,
+            &fixture,
+            ActionKind::RemoveBranchWorkspace,
+            "existing",
+        ),
+        ActionOutcome::Completed { .. }
+    ));
+    assert!(!fixture.linked.exists());
+    assert_ref_exists(&fixture, "existing");
+}
+
+#[test]
+fn workspace_remove_protects_hidden_changes_beyond_the_output_capture_limit() {
+    for flag in ["--assume-unchanged", "--skip-worktree"] {
+        for after_confirmation in [false, true] {
+            let fixture = large_clean_index_fixture();
+            let actions = Actions::with_environment(fixture.environment.clone());
+            if after_confirmation {
+                assert_checked(cleanup_check(
+                    &actions,
+                    &fixture,
+                    ActionKind::RemoveBranchWorkspace,
+                    "existing",
+                ));
+            }
+            let hidden_path = format!("tracked-0799-{}", "x".repeat(80));
+            run_git(
+                &[
+                    "-C",
+                    fixture.linked.to_str().unwrap(),
+                    "update-index",
+                    flag,
+                    &hidden_path,
+                ],
+                &[],
+            );
+            fs::write(fixture.linked.join(&hidden_path), "hidden changes\n").unwrap();
+            let index = Command::new("git")
+                .arg("-C")
+                .arg(&fixture.linked)
+                .args(["ls-files", "--cached", "-v", "-z", "--recurse-submodules"])
+                .output()
+                .unwrap();
+            assert!(index.status.success());
+            let hidden_offset = index
+                .stdout
+                .windows(2)
+                .position(|bytes| bytes == b"h " || bytes == b"S ")
+                .unwrap();
+            assert!(hidden_offset > 65536);
+            let outcome = if after_confirmation {
+                cleanup_run(
+                    &actions,
+                    &fixture,
+                    ActionKind::RemoveBranchWorkspace,
+                    "existing",
+                )
+            } else {
+                cleanup_check(
+                    &actions,
+                    &fixture,
+                    ActionKind::RemoveBranchWorkspace,
+                    "existing",
+                )
+            };
+            match outcome {
+                ActionOutcome::Failed {
+                    message,
+                    uncertain: false,
+                } => assert!(
+                    message.contains("has assume-unchanged or skip-worktree"),
+                    "{message}"
+                ),
+                other => panic!("{other:?}"),
+            }
+            assert_eq!(
+                fs::read_to_string(fixture.linked.join(&hidden_path)).unwrap(),
+                "hidden changes\n"
+            );
+            assert!(!fixture.record.exists());
+        }
+    }
+}
+
 #[test]
 fn workspace_remove_protects_hidden_tracked_changes_and_flags_added_after_confirmation() {
     for flag in ["--assume-unchanged", "--skip-worktree"] {
@@ -1189,7 +1326,13 @@ fn workspace_remove_protects_index_flags_inside_initialized_submodules() {
 
 #[test]
 fn workspace_remove_refuses_failed_or_incomplete_index_flag_inspection() {
-    for mode in ["failure", "truncated", "malformed"] {
+    for mode in [
+        "failure",
+        "incomplete",
+        "malformed",
+        "late-incomplete",
+        "late-malformed",
+    ] {
         let mut fixture = Fixture::new();
         let real_git = Command::new("/usr/bin/which").arg("git").output().unwrap();
         assert!(real_git.status.success());
@@ -1202,10 +1345,14 @@ fn workspace_remove_refuses_failed_or_incomplete_index_flag_inspection() {
             .insert("REAL_GIT".into(), real_git.into());
         let inspection = match mode {
             "failure" => "exit 7",
-            "truncated" => {
-                r#"i=0; while [ "$i" -lt 10000 ]; do printf 'H README\0'; i=$((i + 1)); done; exit 0"#
+            "incomplete" => "printf 'H README'; exit 0",
+            "malformed" => "printf 'HREADME\\0'; exit 0",
+            "late-incomplete" => {
+                r#"i=0; while [ "$i" -lt 10000 ]; do printf 'H README\0'; i=$((i + 1)); done; printf 'H tail'; exit 0"#
             }
-            "malformed" => "printf incomplete; exit 0",
+            "late-malformed" => {
+                r#"i=0; while [ "$i" -lt 10000 ]; do printf 'H README\0'; i=$((i + 1)); done; printf 'Htail\0'; exit 0"#
+            }
             _ => unreachable!(),
         };
         let wrapper = fixture._temp.path().join("bin/git");
