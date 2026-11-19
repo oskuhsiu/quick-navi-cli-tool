@@ -22,7 +22,7 @@ fn settle(app: &mut App, scanner: &Scanner) {
 }
 
 #[test]
-fn one_session_survives_100_scope_refresh_and_search_cycles_without_growth() {
+fn one_session_survives_100_reload_refresh_and_search_cycles_without_growth() {
     let tmp = tempfile::tempdir().unwrap();
     let base = tmp.path().canonicalize().unwrap();
     let roots: Vec<_> = (1..=2)
@@ -39,10 +39,7 @@ fn one_session_survives_100_scope_refresh_and_search_cycles_without_growth() {
     let policy = ExplorationPolicy { home: None };
     let scanner = Scanner::new(policy.clone());
     let mut app = App::new(roots.clone(), policy);
-    // Exercise pruning between depths 1 and 2 regardless of the startup default.
-    app.depth = 1;
     for cycle in 0..100 {
-        app.change_depth(true);
         app.edit_query("project".into());
         settle(&mut app, &scanner);
         assert_eq!(app.nodes.len(), 62);
@@ -50,12 +47,11 @@ fn one_session_survives_100_scope_refresh_and_search_cycles_without_growth() {
         settle(&mut app, &scanner);
         app.clear_filter(true);
         assert!(app.target().is_some());
-        app.change_depth(false);
         app.edit_query("project".into());
         settle(&mut app, &scanner);
         app.reload_roots(roots.clone());
         settle(&mut app, &scanner);
-        assert_eq!(app.nodes.len(), 12, "cycle {cycle} accumulated stale nodes");
+        assert_eq!(app.nodes.len(), 62, "cycle {cycle} accumulated stale nodes");
         assert_eq!(app.pending_scan_count(), 0);
         for (key, node) in &app.nodes {
             if let Some(parent) = key.parent() {

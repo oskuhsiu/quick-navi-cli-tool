@@ -56,10 +56,9 @@ fn refresh_of_unselected_child_column_revalidates_parent_without_autoselect() {
     assert_eq!(app.browse_projection().focus, 1);
 }
 #[test]
-fn paste_is_data_and_depth_never_changes() {
+fn paste_is_query_data_and_rejects_control_characters() {
     let mut app = app();
     app.paste_query("repo[]");
-    assert_eq!(app.depth, 3);
     assert_eq!(app.query(), "repo[]");
     app.paste_query("\n\u{3}");
     assert_eq!(app.query(), "repo[]");

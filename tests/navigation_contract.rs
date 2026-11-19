@@ -55,7 +55,6 @@ fn match_all(app: &mut App) {
 fn startup_and_unselected_child_column_have_no_target() {
     let mut app = app(&["/work", "/other"]);
     let root = NodeKey::root(1);
-    assert_eq!(app.depth, 3);
     assert_eq!(app.target(), None);
     assert_eq!(app.pending_scan_count(), 0);
     assert!(
@@ -77,7 +76,6 @@ fn startup_and_unselected_child_column_have_no_target() {
 #[test]
 fn direct_row_selection_focuses_the_column_and_discards_descendants() {
     let mut app = app(&["/work", "/other"]);
-    app.change_depth(true);
     let root = NodeKey::root(1);
     let a = child(&root, "a");
     let deep = child(&a, "deep");
@@ -144,21 +142,16 @@ fn direct_match_selection_preserves_identity_and_browse_snapshot() {
 }
 
 #[test]
-fn changing_parent_and_shrinking_clear_old_descendant_selection() {
+fn changing_parent_clears_old_descendant_selection() {
     let mut app = app(&["/work", "/other"]);
-    app.depth = 1;
-    app.change_depth(true);
     let root = NodeKey::root(1);
     let a = child(&root, "a");
     let deep = child(&a, "deep");
     listing(&mut app, &root, &["a"]);
     listing(&mut app, &a, &["deep"]);
     app.navigation = Navigation::Browse(BrowseState::at(&deep));
-    app.change_depth(false);
-    assert_eq!(app.target(), Some(a.clone()));
-    app.change_depth(true);
-    assert_eq!(app.target(), Some(a));
-    app.move_horizontal(false);
+    assert_eq!(app.target(), Some(deep));
+    assert!(app.focus_column(0));
     app.move_vertical(true);
     assert_eq!(app.target(), Some(NodeKey::root(2)));
     assert_eq!(app.browse_projection().chain, vec![NodeKey::root(2)]);
@@ -191,9 +184,14 @@ fn filter_discovers_unvisited_branches_and_keeps_same_query_selection() {
 #[test]
 fn tab_adopts_match_while_escape_restores_snapshot() {
     let mut app = app(&["/work"]);
-    app.depth = 1;
     let root = NodeKey::root(1);
-    listing(&mut app, &root, &["docs"]);
+    let mut parent = root.clone();
+    for _ in 0..11 {
+        listing(&mut app, &parent, &["nested"]);
+        parent = child(&parent, "nested");
+    }
+    listing(&mut app, &parent, &["docs"]);
+    let docs = child(&parent, "docs");
     app.move_vertical(true);
     app.edit_query("docs".into());
     match_all(&mut app);
@@ -203,11 +201,12 @@ fn tab_adopts_match_while_escape_restores_snapshot() {
     match_all(&mut app);
     app.clear_filter(true);
     assert!(matches!(app.navigation, Navigation::Browse(_)));
-    assert_eq!(app.target(), Some(child(&root, "docs")));
-    assert!(
-        app.prepare_scan(child(&root, "docs"), true).is_none(),
-        "depth boundary must not list children"
-    );
+    assert_eq!(app.target(), Some(docs.clone()));
+    assert_eq!(app.browse_projection().focus, 12);
+    assert_eq!(app.completion(), "searching");
+    let request = app.prepare_scan(docs, true).unwrap();
+    assert!(app.accept_scan(event(&request, ScanEventKind::Done)));
+    assert_eq!(app.completion(), "complete");
 }
 
 #[test]
@@ -246,7 +245,6 @@ fn cancelled_filter_work_cannot_overwrite_new_listing() {
 #[test]
 fn branch_refresh_uses_focused_parent_and_invalidates_overlapping_occurrences() {
     let mut app = app(&["/work", "/work/a", "/other"]);
-    app.change_depth(true);
     let root = NodeKey::root(1);
     let a = child(&root, "a");
     let overlap = NodeKey::root(2);
@@ -290,8 +288,6 @@ fn full_reload_same_id_with_changed_path_cannot_restore_same_named_child() {
 #[test]
 fn active_filter_pins_nonmatches_and_capacity_stays_partial() {
     let mut app = app(&["/work"]);
-    // The root batch reaches the depth boundary, leaving no deeper work pending.
-    app.depth = 1;
     app.max_nodes = 2;
     let root = NodeKey::root(1);
     app.edit_query("alpha".into());
@@ -300,6 +296,8 @@ fn active_filter_pins_nonmatches_and_capacity_stays_partial() {
     assert!(request.cancel.is_cancelled());
     assert!(app.nodes.contains_key(&child(&root, "beta")));
     assert!(!app.nodes.contains_key(&child(&root, "gamma")));
+    listing(&mut app, &child(&root, "alpha"), &[]);
+    listing(&mut app, &child(&root, "beta"), &[]);
     assert_eq!(app.completion(), "partial");
     assert!(!app.accept_scan(event(&request, ScanEventKind::Done)));
     app.edit_query("beta".into());
@@ -320,10 +318,8 @@ fn checking_action_freezes_path_and_cancellation_keeps_scope_locked() {
         PathBuf::from("/first")
     );
     let scope = app.scope;
-    app.change_depth(true);
     app.refresh_branch();
     app.reload_roots(vec![]);
-    assert_eq!(app.depth, 3);
     assert_eq!(app.scope, scope);
     assert_eq!(app.roots.len(), 2);
     assert!(app.freeze_action(ActionKind::Mkdir).is_none());

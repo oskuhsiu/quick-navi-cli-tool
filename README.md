@@ -3,9 +3,9 @@
 A directory-only terminal navigator with Finder-style columns. Pin the places
 you work in, browse with the arrow keys or mouse, or type to jump between projects.
 
-qnav starts with **only the roots you add**. It explores a bounded depth, skips
-symlinks and common cache/build directories, and keeps its index in memory.
-There is no background daemon, whole-disk scan, or on-disk search database.
+qnav starts with **only the roots you add**. You can browse and search them at
+any depth. It skips symlinks and common cache/build directories and keeps its
+index in memory. There is no background daemon or on-disk search database.
 
 ## Install
 
@@ -80,10 +80,10 @@ the setup.
    To clean up a finished branch, use Ctrl+X to remove its workspace, then Ctrl+D
    to delete the merged branch. Each action asks for confirmation.
 
-For search, just start typing a directory name. Results come from all your roots
-within the allowed depth, including branches you have not browsed. Use ↑/↓ to
-choose a result, Enter to `cd`, or Tab to continue browsing from that result.
-Esc clears the filter and restores your previous browse position.
+For search, just start typing a directory name. Results come from all your roots,
+including branches you have not browsed. Use ↑/↓ to choose a result, Enter to `cd`,
+or Tab to continue browsing from that result. Esc clears the filter and restores
+your previous browse position.
 
 The **Target** line always shows the directory an action will use. A newly
 revealed column has no selected row until you choose one; actions do not silently
@@ -95,8 +95,7 @@ fall back to another column's selection.
 | --- | --- |
 | ↑ / ↓ | Select a directory in the current column or a search result |
 | → / ← | Move to the next column / return to its parent |
-| `[` / `]` | Decrease / increase exploration depth: 1–9, default 3 |
-| Type | Filter directory names across all roots within the allowed depth |
+| Type | Filter directory names across all roots, including names with literal brackets |
 | Tab | Adopt the selected search result and continue column browsing |
 | Esc | Clear the filter and restore browsing, or cancel an input/confirmation |
 | Enter | Exit qnav and change the calling shell's directory; requires wrapper |
@@ -131,7 +130,7 @@ Mouse support is enabled automatically in terminals that report mouse events.
 
 | Input | Action |
 | --- | --- |
-| Left-click a directory | Focus its column and select it; reveal children within the depth limit |
+| Left-click a directory | Focus its column, select it, and reveal its children |
 | Left-click a search result | Select that result; Tab continues browsing from it |
 | Wheel up / down over a list | Move selection one row in that column or search results |
 
@@ -142,14 +141,9 @@ mouse navigation. Mouse capture is disabled when qnav exits.
 
 ## Exploration and refresh
 
-A pinned root is depth **0**; its immediate directories are depth **1**. The
-default depth is 3 and resets when qnav starts. `[` and `]` change how far qnav may
-explore, not how many columns it displays at once.
-
 In normal browsing, children are read as you select their parents. Filtering
-explores all roots up to the depth limit. To keep project navigation focused,
-pin directories that directly contain your projects and increase depth only
-when needed.
+explores all roots at every directory depth. Columns scroll horizontally to keep
+the focused directory visible within the terminal width.
 
 There is no filesystem watcher. If another program adds, removes, or renames a
 directory:
@@ -159,9 +153,9 @@ directory:
 - **Ctrl+F** reloads configuration and clears cached listings for all roots;
   needed listings are then read again. It does not immediately crawl everything.
 
-Neither refresh increases the exploration depth. Loading, permission errors,
-and incomplete results are shown explicitly. Exploration is bounded by 50,000
-cached child occurrences and 1,000,000 inspected entries per exploration budget.
+Loading, permission errors, and incomplete results are shown explicitly.
+Exploration is bounded by 50,000 cached child occurrences and 1,000,000 inspected
+entries per exploration budget.
 
 ### What is skipped
 
@@ -195,8 +189,8 @@ Roots are saved after a successful Add operation:
 A small `config.lock` file beside the configuration coordinates concurrent
 saves. Invalid configuration is reported and preserved, not overwritten.
 
-There is **no persistent directory cache**. Listings, search queries, selection,
-and exploration depth stay in memory and are discarded when qnav exits.
+There is **no persistent directory cache**. Listings, search queries, and
+selection stay in memory and are discarded when qnav exits.
 
 Example configuration:
 
@@ -216,8 +210,7 @@ Using Ctrl+A is the easiest way to create valid entries.
 
 Ctrl+A accepts absolute paths, paths relative to qnav's startup directory, and
 `~/…`. It does not expand environment variables, globs, or shell expressions.
-Pasted text is data: pasted brackets do not change depth, and pasted newlines do
-not submit a form.
+Pasted newlines do not submit a form.
 
 ## Optional integrations and limitations
 

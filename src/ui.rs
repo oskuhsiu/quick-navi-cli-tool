@@ -136,7 +136,7 @@ pub fn draw(frame: &mut Frame, app: &App) -> HitMap {
                 .bg(ACCENT)
                 .add_modifier(Modifier::BOLD),
         ),
-        Span::raw(format!("  depth {} / 9  [− ]+   ", app.depth)),
+        Span::raw("  "),
         Span::styled(
             if app.query().is_empty() {
                 "type to filter".into()
@@ -466,7 +466,7 @@ fn draw_columns(
     manual_offset: usize,
     hits: &mut HitMap,
 ) {
-    let count = (browse.chain.len() + 1).min(app.depth + 1).max(1);
+    let count = browse.chain.len() + 1;
     let visible = (area.width as usize / 26).max(1).min(count);
     let focus = browse.focus.min(count - 1);
     let start = if matches!(app.navigation, Navigation::Filter(_)) {

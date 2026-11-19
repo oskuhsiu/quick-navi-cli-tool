@@ -23,7 +23,6 @@ pub struct ScanRequest {
     pub path: PathBuf,
     pub cancel: CancelToken,
     pub entry_budget: Arc<AtomicUsize>,
-    pub list_children: bool,
 }
 #[derive(Debug)]
 pub struct ScanEvent {
@@ -203,10 +202,6 @@ fn scan(
             return;
         }
     };
-    if !request.list_children {
-        emit(ScanEventKind::Done);
-        return;
-    }
     if request.cancel.is_cancelled() || shutdown.is_cancelled() {
         return;
     }

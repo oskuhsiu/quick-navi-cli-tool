@@ -166,6 +166,14 @@ def configure(path, roots):
     path.write_text(json.dumps({"version": 1, "roots": [{"id": i + 1, "path": str(root)} for i, root in enumerate(roots)]}))
 
 
+def selected_target(terminal, path):
+    expected = "Target:" + str(path)
+    def displayed():
+        compact = "".join(line.strip() for line in terminal.screen.text().splitlines())
+        return expected in compact.replace("Target: ", "Target:")
+    terminal.wait(displayed, "selected target " + str(path))
+
+
 def smoke(binary):
     with tempfile.TemporaryDirectory(prefix="qnav-pty-") as temporary:
         fixture = Path(temporary).resolve()
@@ -182,7 +190,7 @@ def smoke(binary):
         for size in [(120, 30), (80, 24), (40, 12)]:
             terminal = Terminal([str(binary), "--config", str(config)], env, fixture, size, f"navigation-{size[0]}x{size[1]}")
             try:
-                terminal.contains("depth 3")
+                terminal.contains("type to filter")
                 assert "alpha" not in terminal.screen.text(), "startup unexpectedly shows child listing"
                 terminal.contains("(none")
                 terminal.send(DOWN)
@@ -217,13 +225,11 @@ def smoke(binary):
 
         terminal = Terminal([str(binary), "--config", str(config)], env, fixture, (120, 30), "filter-refresh-paste")
         try:
-            terminal.contains("depth 3")
+            terminal.contains("type to filter")
             terminal.send(DOWN)
             terminal.contains("alpha")
             terminal.contains(r"bad\u{1b}[31mname")
             assert b"bad\x1b[31mname" not in terminal.output, "filename injected terminal controls"
-            terminal.send(b"]")
-            terminal.contains("depth 4")
             terminal.send(b"nested")
             terminal.contains("/nested")
             terminal.send(b"\t")
@@ -239,9 +245,12 @@ def smoke(binary):
             (root / "newclone").mkdir()
             terminal.send(b"\x12")
             terminal.contains("newclone")
+            terminal.send(b"[]")
+            terminal.contains("filter: []")
+            terminal.send(b"\x1b")
+            terminal.contains("type to filter")
             terminal.paste("[]")
             terminal.contains("filter: []")
-            terminal.contains("depth 4")
             terminal.paste("bad\n\x01")
             terminal.contains("Paste rejected")
             terminal.contains("filter: []")
@@ -249,7 +258,45 @@ def smoke(binary):
             terminal.send(b"\x03")
             terminal.finish(130)
         finally: terminal.close()
-        print("PASS filter-refresh-paste: depth, unvisited match, Tab, Esc, external clone refresh, paste and escaping")
+        print("PASS filter-refresh-paste: unvisited match, Tab, Esc, external clone refresh, typed brackets, paste and escaping")
+
+        deep_root = fixture / "deep-root"
+        components = [f"d{index:02}" for index in range(1, 11)] + ["deepneedle"]
+        deep_target = deep_root.joinpath(*components)
+        deep_target.mkdir(parents=True)
+        deep_config = fixture / "deep-config.json"
+        configure(deep_config, [deep_root])
+        for mode in ("browse", "search"):
+            result = fixture / ("deep-result-" + mode)
+            result.touch(mode=0o600)
+            terminal = Terminal([str(binary), "--config", str(deep_config), "--result-file", str(result)],
+                                env, fixture, (120, 30), "deep-" + mode)
+            try:
+                terminal.contains("type to filter")
+                assert "deepneedle" not in terminal.screen.text()
+                if mode == "browse":
+                    terminal.send(DOWN)
+                    selected_target(terminal, deep_root)
+                    target = deep_root
+                    for component in components:
+                        terminal.send(RIGHT)
+                        terminal.contains(component)
+                        terminal.send(DOWN)
+                        target = target / component
+                        selected_target(terminal, target)
+                else:
+                    terminal.send(b"deepneedle")
+                    selected_target(terminal, deep_target)
+                    terminal.contains("Matches 1")
+                    terminal.send(b"\t")
+                    terminal.contains("type to filter")
+                    selected_target(terminal, deep_target)
+                terminal.send(b"\r")
+                terminal.finish(0)
+                assert result.read_bytes() == b"qnav-v1\0cd\0" + os.fsencode(deep_target) + b"\0"
+            finally:
+                terminal.close()
+            print(f"PASS deep-{mode}: level-11 target selected and returned through Enter")
 
         added = fixture / "added []"
         added.mkdir()
@@ -265,11 +312,11 @@ def smoke(binary):
             terminal.send(b"\r")
             terminal.contains("Root added:")
             assert json.loads(empty_config.read_text())["roots"][0]["path"] == str(added)
-            terminal.contains("depth 3")
+            terminal.contains("type to filter")
             terminal.send(b"\x03")
             terminal.finish(130)
         finally: terminal.close()
-        print("PASS add-root-paste: explicit submit, saved native path, brackets preserve depth")
+        print("PASS add-root-paste: explicit submit, saved native path, brackets remain path data")
 
         for shell in ["bash", "zsh"]:
             executable = shutil.which(shell)
@@ -277,7 +324,7 @@ def smoke(binary):
             command = "source " + shlex.quote(str(REPO / "shell" / ("qnav." + shell))) + "; qnav --config " + shlex.quote(str(config)) + '; qnav_status=$?; printf "\\nQNAV_RC:%s\\n" "$qnav_status"; printf "QNAV_CWD:%s\\n" "$PWD"'
             terminal = Terminal([executable, "-f", "-c", command], env, fixture, (120, 30), "wrapper-" + shell)
             try:
-                terminal.contains("depth 3")
+                terminal.contains("type to filter")
                 terminal.send(DOWN)
                 terminal.contains("alpha")
                 terminal.send(RIGHT)

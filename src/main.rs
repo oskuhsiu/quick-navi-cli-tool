@@ -42,7 +42,7 @@ fn options() -> Result<Option<Options>, String> {
                 let bash_wrapper = display_path(&checkout.join("shell/qnav.bash"));
                 let zsh_wrapper = display_path(&checkout.join("shell/qnav.zsh"));
                 let help = format!(
-                    "qnav — terminal directory columns\n\nUsage: qnav [--config PATH]\n\nEnter changes the CALLING shell's directory, so it needs a shell function.\ncargo install installs the binary only; it does not set up your shell.\nAfter leaving qnav with Ctrl-C, source ONE wrapper for your shell:\n  Bash wrapper: {bash_wrapper}\n  Zsh wrapper:  {zsh_wrapper}\nUse: source '<absolute wrapper path>', then run qnav again.\nThese files are in this build's source checkout; if moved, use its new location.\nWithout shell setup, browsing, hd, pane, mkdir and git init still work.\n\n↑↓ select  ←→ columns  [ ] depth (1–9, default 3)  type to filter\nTab browse match  Esc clear/cancel  Ctrl-C exit\nMouse: left-click selects; wheel moves selection in hovered list\nEnter cd  Ctrl-O hd  Ctrl-P Herdr pane\nCtrl-A add root  Ctrl-N mkdir  Ctrl-G git init\nCtrl-R refresh branch  Ctrl-L reload all roots\n\nNo automatic roots, profile edits, background daemon, or symlink traversal."
+                    "qnav — terminal directory columns\n\nUsage: qnav [--config PATH]\n\nEnter changes the CALLING shell's directory, so it needs a shell function.\ncargo install installs the binary only; it does not set up your shell.\nAfter leaving qnav with Ctrl-C, source ONE wrapper for your shell:\n  Bash wrapper: {bash_wrapper}\n  Zsh wrapper:  {zsh_wrapper}\nUse: source '<absolute wrapper path>', then run qnav again.\nThese files are in this build's source checkout; if moved, use its new location.\nWithout shell setup, browsing, hd, pane, mkdir and git init still work.\n\n↑↓ select  ←→ columns  type to filter directories at any depth\nTab browse match  Esc clear/cancel  Ctrl-C exit\nMouse: left-click selects; wheel moves selection in hovered list\nEnter cd  Ctrl-O hd  Ctrl-P Herdr pane\nCtrl-A add root  Ctrl-N mkdir  Ctrl-G git init\nCtrl-R refresh branch  Ctrl-L reload all roots\n\nNo automatic roots, profile edits, background daemon, or symlink traversal."
                 );
                 println!(
                     "{}",
@@ -397,8 +397,6 @@ impl Runtime {
             KeyCode::Down => self.app.move_vertical(true),
             KeyCode::Left => self.app.move_horizontal(false),
             KeyCode::Right => self.app.move_horizontal(true),
-            KeyCode::Char('[') => self.app.change_depth(false),
-            KeyCode::Char(']') => self.app.change_depth(true),
             KeyCode::Esc => self.app.clear_filter(false),
             KeyCode::Tab => self.app.clear_filter(true),
             KeyCode::Backspace | KeyCode::Delete => {
@@ -1251,7 +1249,7 @@ mod tests {
         rt.app.add_root = Some(String::new());
         rt.paste("a[]\nb".into());
         assert_eq!(rt.app.add_root.as_deref(), Some("a[]\nb"));
-        assert_eq!(rt.app.depth, 3);
+        assert!(rt.app.query().is_empty());
         rt.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));
         rt.app.move_vertical(true);
         let id = rt.app.freeze_action(ActionKind::GitInit).unwrap();
@@ -1398,7 +1396,7 @@ mod tests {
         rt.paste("unexpected".into());
         assert!(!rt.mouse(mouse(MouseEventKind::ScrollDown), &hits));
         assert_eq!(rt.app.target(), target);
-        assert_eq!(rt.app.depth, 3);
+        assert!(rt.app.query().is_empty());
         assert_eq!(rt.app.branch_picker.as_ref().unwrap().query, "topic/");
         assert_eq!(rt.app.pending_action.as_ref().unwrap().id, id);
         rt.key(KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE));

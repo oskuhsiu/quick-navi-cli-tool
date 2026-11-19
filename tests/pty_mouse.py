@@ -62,7 +62,7 @@ def smoke(binary):
             terminal = Terminal([str(binary), "--config", str(config), "--result-file", str(result)],
                                 env, fixture, (120, 30), label)
             try:
-                terminal.contains("depth 3")
+                terminal.contains("type to filter")
                 for mode in (1000, 1002, 1003, 1015, 1006):
                     assert f"\x1b[?{mode}h".encode() in terminal.output, f"mouse mode {mode} not enabled"
                 mouse(terminal, point(terminal, "root"))

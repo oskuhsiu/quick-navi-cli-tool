@@ -35,7 +35,6 @@ pub struct App {
     pub roots: Vec<RootEntry>,
     pub nodes: BTreeMap<NodeKey, DirectoryNode>,
     pub navigation: Navigation,
-    pub depth: usize,
     pub scope: u64,
     pub candidate_version: u64,
     pub work_ids: WorkIds,
@@ -68,7 +67,6 @@ impl App {
             roots,
             nodes,
             navigation: Navigation::Browse(BrowseState::default()),
-            depth: 3,
             scope: 0,
             candidate_version: 0,
             work_ids: WorkIds::default(),
@@ -95,11 +93,9 @@ impl App {
             .map(|r| r.path.join(&key.relative))
     }
     pub fn valid(&self, key: &NodeKey) -> bool {
-        key.depth() <= self.depth
-            && key
-                .chain()
-                .iter()
-                .all(|k| self.nodes.get(k).is_some_and(|n| n.verified))
+        key.chain()
+            .iter()
+            .all(|k| self.nodes.get(k).is_some_and(|n| n.verified))
     }
     pub fn target(&self) -> Option<NodeKey> {
         let key = match &self.navigation {
@@ -137,20 +133,14 @@ impl App {
             .chain
             .get(column - 1)
             .and_then(|p| self.nodes.get(p))
-            .map(|n| {
-                n.children
-                    .values()
-                    .filter(|k| k.depth() <= self.depth)
-                    .cloned()
-                    .collect()
-            })
+            .map(|n| n.children.values().cloned().collect())
             .unwrap_or_default()
     }
     pub fn focus_column(&mut self, column: usize) -> bool {
         let Navigation::Browse(b) = &mut self.navigation else {
             return false;
         };
-        if column > b.chain.len() || column > self.depth {
+        if column > b.chain.len() {
             return false;
         }
         self.restore = None;
@@ -161,10 +151,7 @@ impl App {
         let Navigation::Browse(b) = &self.navigation else {
             return false;
         };
-        if column > b.chain.len()
-            || column > self.depth
-            || !self.column_rows(column, b).contains(key)
-        {
+        if column > b.chain.len() || !self.column_rows(column, b).contains(key) {
             return false;
         }
         self.focus_column(column);
@@ -218,18 +205,22 @@ impl App {
         self.restore = None;
         match &mut self.navigation {
             Navigation::Browse(b) => {
-                if right && b.focus < b.chain.len() && b.focus < self.depth {
+                if right && b.focus < b.chain.len() {
                     b.focus += 1;
                 } else if !right {
                     b.focus = b.focus.saturating_sub(1);
                 }
             }
             Navigation::Filter(s) => {
-                if right {
-                    s.viewport = (s.viewport + 1).min(self.depth);
+                let last_column = match &s.selection {
+                    MatchSelection::Selected(key) => key.depth() + 1,
+                    _ => 0,
+                };
+                s.viewport = if right {
+                    (s.viewport + 1).min(last_column)
                 } else {
-                    s.viewport = s.viewport.saturating_sub(1);
-                }
+                    s.viewport.min(last_column).saturating_sub(1)
+                };
             }
         }
     }
@@ -307,45 +298,19 @@ impl App {
         self.restore = None;
         self.clip_navigation();
     }
-    pub fn change_depth(&mut self, increase: bool) {
-        if self.scope_locked() {
-            self.status = "Finish or cancel the pending action first".into();
-            return;
-        }
-        let next = if increase {
-            (self.depth + 1).min(9)
-        } else {
-            self.depth.saturating_sub(1).max(1)
-        };
-        if next == self.depth {
-            return;
-        }
-        self.cancel_scans(true);
-        self.depth = next;
-        self.scope += 1;
-        self.restore = None;
-        self.entries = Arc::new(AtomicUsize::new(MAX_ENTRIES));
-        self.clip_navigation();
-        self.changed();
-    }
     fn clip_navigation(&mut self) {
-        let valid: BTreeSet<_> = self
-            .nodes
-            .iter()
-            .filter(|(k, n)| k.depth() <= self.depth && n.verified)
-            .map(|(k, _)| k.clone())
-            .collect();
+        let verified = |key: &NodeKey| self.nodes.get(key).is_some_and(|n| n.verified);
         let clip = |b: &mut BrowseState| {
-            let n = b.chain.iter().take_while(|k| valid.contains(*k)).count();
-            b.chain.truncate(n.min(self.depth + 1));
-            b.focus = b.focus.min(self.depth).min(b.chain.len());
+            let n = b.chain.iter().take_while(|k| verified(k)).count();
+            b.chain.truncate(n);
+            b.focus = b.focus.min(n);
         };
         match &mut self.navigation {
             Navigation::Browse(b) => clip(b),
             Navigation::Filter(s) => {
                 clip(&mut s.snapshot);
-                s.matches.retain(|k| valid.contains(k));
-                if matches!(&s.selection,MatchSelection::Selected(k) if !valid.contains(k)) {
+                s.matches.retain(verified);
+                if matches!(&s.selection,MatchSelection::Selected(k) if !verified(k)) {
                     s.selection = MatchSelection::ExplicitNone;
                 }
             }
@@ -441,7 +406,9 @@ impl App {
             .filter(|r| self.roots.iter().any(|old| old == *r))
             .map(|r| r.id)
             .collect();
-        self.cancel_scans(true);
+        for (_, scan) in std::mem::take(&mut self.pending_scans) {
+            scan.cancel.cancel();
+        }
         self.scope += 1;
         self.roots = roots;
         self.nodes = self
@@ -536,7 +503,7 @@ impl App {
             .iter()
             .find(|r| r.id == request.source.root)
             .expect("scope stays locked through action");
-        let shown = child.depth() <= self.depth && self.policy.allows(&root.path, created);
+        let shown = self.policy.allows(&root.path, created);
         let desired = if shown { child } else { request.source.clone() };
         self.navigation = Navigation::Browse(BrowseState::at(&request.source));
         self.restore = Some(RestoreIntent {
@@ -547,7 +514,7 @@ impl App {
         self.status = if shown {
             message
         } else {
-            format!("{message}; outside depth or excluded — staying at parent")
+            format!("{message} — directory excluded, staying at parent")
         };
     }
 
@@ -771,17 +738,6 @@ impl App {
             n.children.retain(|_, k| keys.contains(k));
         }
     }
-    fn cancel_scans(&mut self, all: bool) {
-        let keys: Vec<_> = self
-            .pending_scans
-            .iter()
-            .filter(|(_, p)| all || !p.foreground)
-            .map(|(k, _)| k.clone())
-            .collect();
-        for key in keys {
-            self.cancel_listing(&key);
-        }
-    }
     fn cancel_listing(&mut self, key: &NodeKey) {
         let keys: Vec<_> = self
             .nodes
@@ -806,9 +762,6 @@ impl App {
         self.changed();
     }
     pub fn prepare_scan(&mut self, key: NodeKey, foreground: bool) -> Option<ScanRequest> {
-        if key.depth() > self.depth {
-            return None;
-        }
         if let Some(p) = self.pending_scans.get(&key) {
             if !foreground || p.foreground {
                 return None;
@@ -824,7 +777,7 @@ impl App {
             return None;
         }
         let n = self.nodes.get(&key)?;
-        if n.listing != ListingState::Unread || (key.depth() == self.depth && n.verified) {
+        if n.listing != ListingState::Unread {
             return None;
         }
         let id = self.work_ids.allocate()?;
@@ -842,13 +795,12 @@ impl App {
         );
         Some(ScanRequest {
             scope: self.scope,
-            key: key.clone(),
+            key,
             id,
             root_path,
             path,
             cancel,
             entry_budget: self.entries.clone(),
-            list_children: key.depth() < self.depth,
         })
     }
     pub fn reject_submission(&mut self, request: &ScanRequest) {
@@ -935,9 +887,6 @@ impl App {
                 self.nodes.get_mut(&event.key).unwrap().verified = true;
                 for name in names {
                     let key = event.key.child(&name);
-                    if key.depth() > self.depth {
-                        continue;
-                    }
                     if self.nodes.len() >= self.max_nodes + self.roots.len()
                         && !self.nodes.contains_key(&key)
                         && !self.evict_unprotected(&event.key)
@@ -1020,7 +969,7 @@ impl App {
             self.restore = None;
             return;
         }
-        if !r.key.chain().iter().all(|k| self.valid(k)) {
+        if !self.valid(&r.key) {
             return;
         }
         if let Navigation::Filter(s) = &self.navigation {
@@ -1044,31 +993,15 @@ impl App {
         }
     }
     pub fn completion(&self) -> &'static str {
-        let mut incomplete = false;
         let mut partial = false;
-        for (k, n) in &self.nodes {
-            if k.depth() > self.depth {
-                continue;
-            }
-            if matches!(
-                n.listing,
-                ListingState::Partial(_) | ListingState::Failed(_)
-            ) {
-                partial = true;
-            }
-            if (k.depth() < self.depth || !n.verified)
-                && matches!(n.listing, ListingState::Unread | ListingState::Loading(_))
-            {
-                incomplete = true;
+        for node in self.nodes.values() {
+            match node.listing {
+                ListingState::Unread | ListingState::Loading(_) => return "searching",
+                ListingState::Partial(_) | ListingState::Failed(_) => partial = true,
+                ListingState::Ready => {}
             }
         }
-        if incomplete {
-            "searching"
-        } else if partial {
-            "partial"
-        } else {
-            "complete"
-        }
+        if partial { "partial" } else { "complete" }
     }
     pub fn match_tick(&mut self) -> bool {
         let Navigation::Filter(s) = &self.navigation else {
@@ -1111,7 +1044,7 @@ impl App {
             // Invalidating a parent removes its descendant occurrences. The
             // candidate index therefore already guarantees a verified ancestry;
             // rebuilding and looking up that chain for every keystroke is redundant.
-            if !node.verified || key.depth() > self.depth {
+            if !node.verified {
                 continue;
             }
             let root_index = self.roots.iter().position(|r| r.id == key.root).unwrap();

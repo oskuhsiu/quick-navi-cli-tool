@@ -255,7 +255,7 @@ fn partial_listing_is_visible_even_when_it_contains_rows() {
 }
 
 #[test]
-fn depth_nine_unicode_and_narrow_columns_render_without_a_second_target() {
+fn deep_unicode_and_narrow_columns_render_without_a_second_target() {
     let mut app = App::new(
         vec![RootEntry {
             id: 1,
@@ -263,12 +263,8 @@ fn depth_nine_unicode_and_narrow_columns_render_without_a_second_target() {
         }],
         ExplorationPolicy { home: None },
     );
-    for _ in 0..20 {
-        app.change_depth(true);
-    }
-    assert_eq!(app.depth, 9);
     let mut parent = NodeKey::root(1);
-    for n in 0..9 {
+    for n in 0..12 {
         let name = format!("目录{n}-e\u{301}");
         let key = parent.child(name.as_ref());
         app.nodes
@@ -282,7 +278,7 @@ fn depth_nine_unicode_and_narrow_columns_render_without_a_second_target() {
         parent = key;
     }
     app.navigation = Navigation::Browse(BrowseState::at(&parent));
-    assert!(app.prepare_scan(parent.clone(), true).is_none());
+    assert!(app.prepare_scan(parent.clone(), true).is_some());
     for (width, height) in [(120, 30), (80, 24), (40, 12)] {
         let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
         terminal
@@ -299,16 +295,12 @@ fn depth_nine_unicode_and_narrow_columns_render_without_a_second_target() {
             .collect::<String>();
         // TestBackend retains a blank continuation cell for each double-width glyph.
         assert!(
-            text.replace(' ', "").contains("目录8"),
+            text.replace(' ', "").contains("目录11"),
             "{width}x{height}: {text}"
         );
         assert!(text.contains('‹'));
         assert_eq!(app.target(), Some(parent.clone()));
     }
-    for _ in 0..20 {
-        app.change_depth(false);
-    }
-    assert_eq!(app.depth, 1);
 }
 
 fn render_hits(app: &App, width: u16, height: u16) -> (ui::HitMap, Terminal<TestBackend>) {
@@ -361,7 +353,6 @@ fn column_hits_follow_visible_rows_and_keep_rendered_identity() {
 #[test]
 fn narrow_deep_column_hits_use_absolute_column_index() {
     let mut app = many_roots();
-    app.depth = 9;
     let key = NodeKey::root(1);
     let child = key.child("child".as_ref());
     app.nodes

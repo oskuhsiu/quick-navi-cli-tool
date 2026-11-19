@@ -18,7 +18,6 @@ fn request(path: &Path, budget: usize) -> ScanRequest {
         path: path.into(),
         cancel: CancelToken::default(),
         entry_budget: Arc::new(AtomicUsize::new(budget)),
-        list_children: true,
     }
 }
 fn collect(scanner: &Scanner) -> Vec<ScanEventKind> {
@@ -139,14 +138,11 @@ fn queued_replaced_directory_is_not_followed() {
 }
 
 #[test]
-fn validation_only_does_not_consume_entries() {
+fn empty_directory_does_not_consume_entries() {
     let temp = tempfile::tempdir().unwrap();
     let path = temp.path().canonicalize().unwrap();
-    std::fs::write(path.join("file"), "").unwrap();
     let scanner = Scanner::new(ExplorationPolicy { home: None });
-    let mut req = request(&path, 0);
-    req.list_children = false;
-    scanner.try_submit(req, true).unwrap();
+    scanner.try_submit(request(&path, 0), true).unwrap();
     assert!(matches!(
         collect(&scanner).as_slice(),
         [ScanEventKind::Done]
