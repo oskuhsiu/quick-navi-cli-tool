@@ -1436,7 +1436,7 @@ impl Worker {
         let (executable, args, duration): (&Path, Vec<&OsStr>, Duration) = match request.kind {
             ActionKind::GitInit => (
                 prepared.git.as_ref().unwrap(),
-                vec![OsStr::new("init")],
+                vec![OsStr::new("init"), OsStr::new("--initial-branch=main")],
                 Duration::from_secs(10),
             ),
             ActionKind::OpenHd => (

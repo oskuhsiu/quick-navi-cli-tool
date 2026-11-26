@@ -29,8 +29,10 @@ def run(binary):
         for key in list(env):
             if key.startswith("GIT_"):
                 del env[key]
+        git_config = fixture / "gitconfig"
+        git_config.write_text("[init]\n\tdefaultBranch = master\n")
         env.update(TERM="xterm-256color", QNAV_TEST_RECORD=str(fixture),
-                   GIT_CONFIG_GLOBAL="/dev/null", GIT_CONFIG_SYSTEM="/dev/null",
+                   GIT_CONFIG_GLOBAL=str(git_config), GIT_CONFIG_SYSTEM="/dev/null",
                    PATH=str(commands) + os.pathsep + env.get("PATH", ""))
         terminal = Terminal([str(binary), "--config", str(config)], env, fixture,
                             (120, 30), "actions-mkdir-git-hd-pane")
@@ -51,6 +53,8 @@ def run(binary):
             terminal.contains("[x] Cancel")
             terminal.send(RIGHT + b"\r")
             terminal.wait(lambda: (project / ".git").is_dir() and "Action completed" in terminal.screen.text(), "confirmed real git init")
+            head = subprocess.check_output(["git", "-C", str(project), "symbolic-ref", "HEAD"], env=env, text=True).strip()
+            assert head == "refs/heads/main", head
             (project / "README").write_text("branch fixture\n")
             subprocess.run(["git", "-C", str(project), "add", "README"], check=True, env=env)
             subprocess.run([

@@ -106,7 +106,7 @@ fall back to another column's selection.
 | Ctrl+P | Open a Herdr shell pane at the target; keep qnav open |
 | Ctrl+A | Add an existing directory as a root |
 | Ctrl+N | Create a child directory; in the branch picker, create from the selected base |
-| Ctrl+G | Confirm and run `git init` at the target |
+| Ctrl+G | Confirm and initialize a Git repository with `main` at the target |
 | Ctrl+R | Refresh the branch displayed in the current column |
 | Ctrl+F | Reload roots from configuration and invalidate all cached listings |
 | Ctrl+C | Exit without changing the calling shell's directory |
@@ -255,7 +255,7 @@ functions. Plain browsing and Enter do not require either tool.
   state. These checks do not lock out concurrent Git or filesystem changes.
 - **Ctrl+P:** requires Herdr and an active Herdr pane. It creates and focuses a
   right-hand shell pane with the exact target directory as its working directory.
-- **Ctrl+G:** requires Git and explicit confirmation. qnav does not create
+- **Ctrl+G:** requires Git 2.28 or later and explicit confirmation. qnav does not create
   commits, configure remotes, or push your projects.
 
 Known compatibility issue observed with **hd 0.4.0 + Herdr 0.9.0**: reopening a
